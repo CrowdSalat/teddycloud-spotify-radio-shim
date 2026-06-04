@@ -1,0 +1,17 @@
+# Binaries
+/bin/
+*.exe
+
+# Go
+/vendor/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude/Pi
+.claude/
