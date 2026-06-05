@@ -1,0 +1,15 @@
+linters:
+  enable:
+    - errcheck        # unchecked errors
+    - govet           # go vet
+    - staticcheck     # staticcheck SA* rules
+    - unused          # unused code
+    - gosimple        # simplify code (staticcheck S*)
+    - ineffassign     # ineffectual assignments
+    - gofmt           # formatting
+    - goimports       # import ordering
+    - misspell        # typos in comments and strings
+    - godot           # comments should end with a period
+
+issues:
+  max-same-issues: 0
