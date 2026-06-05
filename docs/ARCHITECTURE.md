@@ -156,8 +156,34 @@ All via environment variables:
 
 ---
 
+## Implementation Notes
+
+Findings confirmed during development that affect design or operation.
+
+### go-librespot `GET /` blocks until authenticated
+
+The root endpoint does not return until Spotify authentication completes. It cannot be used as a readiness check in unauthenticated state. The supervisor uses a **raw TCP dial on port 3678** instead — any successful connection means the API server is up and accepting connections, regardless of auth state.
+
+### go-librespot ignores SIGTERM during auth
+
+While blocked waiting for OAuth completion, go-librespot does not respond to SIGTERM. The supervisor's crash simulation test requires SIGKILL. In normal authenticated operation SIGTERM works correctly. The supervisor already sends SIGTERM first with a 5s grace period before escalating to SIGKILL.
+
+### OAuth callback port is random and unexposed
+
+go-librespot's interactive auth binds its callback server to `http://127.0.0.1:<random-port>/login`. The port changes on every restart. In a container, this port is never exposed to the host. Until Phase 7 implements the `/login` proxy, completing auth requires exec-ing into the container:
+
+```bash
+# Spotify redirects browser to: http://127.0.0.1:<PORT>/login?code=<CODE>
+# Take that full URL and run it inside the container:
+podman exec <container> curl -s "http://127.0.0.1:<PORT>/login?code=<CODE>"
+# Response: "Go back to go-librespot!"
+```
+
+Phase 7 must expose a stable `/login` endpoint on port 8080 that discovers go-librespot's random callback port and proxies the OAuth code to it.
+
+---
+
 ## Open Questions
 
 1. **PCM → audio transcoding.** go-librespot outputs raw PCM. What Content-Type does Teddycloud accept? Needs testing against actual Teddycloud. Candidates: raw PCM with WAV header, OGG/Vorbis re-encoding, or passthrough if Teddycloud accepts raw.
 2. **Tag-removed SSE event name.** `tbs_tag_removed()` emits an SSE event — exact name needs verification from Teddycloud source.
-3. **OAuth callback routing.** go-librespot's interactive auth may bind to a random port. The shim may need to proxy the callback through its known port (8080) exposed via an OpenShift Route.
