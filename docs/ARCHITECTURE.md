@@ -160,6 +160,10 @@ All via environment variables:
 
 Findings confirmed during development that affect design or operation.
 
+### FIFO open ordering is strict
+
+The named FIFO read end must be opened before go-librespot opens the write end. go-librespot opens the pipe with `O_WRONLY|O_NONBLOCK` and returns an error immediately if no reader exists. `supervisor.Prepare()` creates the FIFO, then the caller must start a goroutine that opens the read end before calling `supervisor.Run()`. Opening in the same goroutine before `Run()` deadlocks — `os.Open` blocks waiting for a writer that never comes because `Run()` is never reached.
+
 ### go-librespot `GET /` blocks until authenticated
 
 The root endpoint does not return until Spotify authentication completes. It cannot be used as a readiness check in unauthenticated state. The supervisor uses a **raw TCP dial on port 3678** instead — any successful connection means the API server is up and accepting connections, regardless of auth state.

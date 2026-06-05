@@ -9,7 +9,7 @@ build:
 	go build $(LDFLAGS) -o bin/shim ./cmd/shim
 
 test:
-	go test -v ./...
+	CGO_ENABLED=0 go test -v ./...
 
 lint:
 	$(GOLANGCI_LINT) run ./... && echo "✅ lint passed"

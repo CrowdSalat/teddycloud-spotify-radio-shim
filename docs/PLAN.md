@@ -108,26 +108,38 @@ go test ./internal/audio/ -v -run TestReader
   - On handler exit: logs disconnect
 - **Spike: Teddycloud audio format acceptance** — test what Content-Type / format Teddycloud actually accepts by manually serving a known audio file. Document findings.
 
-**Acceptance criteria:**
+**Acceptance criteria (run inside container with persisted auth session):**
 ```bash
-# Start shim (with go-librespot running from Phase 1)
-./shim &
+podman build --platform linux/amd64 -f Containerfile -t shim-test .
+podman run -d --name shim-phase3 --platform linux/amd64 \
+  -p 8083:8080 -v /path/to/config:/config:Z shim-test
+sleep 10
 
-# Request a stream (use a known Spotify URI — requires authenticated session)
+# 1. Stream returns HTTP 200 with audio/wav Content-Type and audio bytes
 curl -s -o /tmp/audio_sample.raw \
-     -w "%{content_type}\n%{http_code}\n" \
-     --max-time 10 \
-     "http://localhost:8080/stream?spotify_uri=spotify:track:4PTG3Z6ehGkBFwjybzWkR8"
+     -w "HTTP %{http_code} | Content-Type: %{content_type} | Bytes: %{size_download}\n" \
+     --max-time 8 \
+     "http://localhost:8083/stream?spotify_uri=spotify:track:4PTG3Z6ehGkBFwjybzWkR8"
+# → HTTP 200 | Content-Type: audio/wav | Bytes: >0
 
-# 1. HTTP 200
-# 2. Content-Type header is set
-# 3. File is non-empty and contains audio data
-test -s /tmp/audio_sample.raw          # non-empty
-wc -c < /tmp/audio_sample.raw          # > 0 bytes
+# 2. go-librespot is playing
+podman exec shim-phase3 curl -sf http://localhost:3678/status | python3 -c \
+  "import sys,json; d=json.load(sys.stdin); assert not d['paused'] and not d['stopped']"
 
-# 4. go-librespot status shows playing
-curl -sf http://localhost:3678/status | jq -e '.paused == false'
+# 3. WAV header is valid
+python3 -c "
+import struct
+d = open('/tmp/audio_sample.raw','rb').read(44)
+assert d[:4]==b'RIFF' and d[8:12]==b'WAVE'
+assert struct.unpack_from('<I',d,4)[0]==0xFFFFFFFF
+print('valid streaming WAV header')"
+
+podman rm -f shim-phase3
 ```
+
+**Finding:** Without a downstream consumer applying backpressure, go-librespot
+decodes faster than real-time (~150×). Proper real-time throttling happens
+naturally once Teddycloud consumes at its own rate (Phase integration).
 
 ---
 

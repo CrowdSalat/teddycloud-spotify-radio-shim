@@ -12,7 +12,10 @@ import (
 )
 
 const (
-	fifoPath       = "/tmp/spotify.fifo"
+	// FIFOPath is the named pipe go-librespot writes PCM audio to.
+	// The read end must be opened before Run() starts go-librespot.
+	FIFOPath = "/tmp/spotify.fifo"
+
 	librespotBin   = "go-librespot"
 	librespotAPI   = "http://localhost:3678"
 	readyTimeout   = 30 * time.Second
@@ -40,17 +43,20 @@ func New(configDir, logLevel string, logger *slog.Logger) *Supervisor {
 	}
 }
 
-// Run manages go-librespot's lifecycle until ctx is cancelled.
-// It creates the FIFO, writes the config, and enters a restart loop.
-func (s *Supervisor) Run(ctx context.Context) error {
+// Prepare creates the FIFO and writes go-librespot's config.
+// It must be called before Run(). After Prepare returns, open the FIFO
+// read end (FIFOPath) in a goroutine before calling Run() — go-librespot
+// opens the write end with O_NONBLOCK and errors if no reader exists.
+func (s *Supervisor) Prepare() error {
 	if err := s.createFIFO(); err != nil {
 		return fmt.Errorf("create fifo: %w", err)
 	}
+	return WriteConfig(s.configDir, FIFOPath, s.logLevel)
+}
 
-	if err := WriteConfig(s.configDir, fifoPath, s.logLevel); err != nil {
-		return fmt.Errorf("write config: %w", err)
-	}
-
+// Run manages go-librespot's lifecycle until ctx is cancelled.
+// Call Prepare() and open the FIFO read end before calling Run().
+func (s *Supervisor) Run(ctx context.Context) error {
 	backoff := backoffInit
 
 	for {
@@ -187,13 +193,13 @@ func (s *Supervisor) killProcess(cmd *exec.Cmd) {
 // createFIFO creates the named pipe if it doesn't already exist.
 func (s *Supervisor) createFIFO() error {
 	// Remove stale FIFO from a previous run.
-	_ = os.Remove(fifoPath)
+	_ = os.Remove(FIFOPath)
 
-	if err := syscall.Mkfifo(fifoPath, 0660); err != nil {
-		return fmt.Errorf("mkfifo %s: %w", fifoPath, err)
+	if err := syscall.Mkfifo(FIFOPath, 0660); err != nil {
+		return fmt.Errorf("mkfifo %s: %w", FIFOPath, err)
 	}
 
-	s.logger.Info("created FIFO", "path", fifoPath)
+	s.logger.Info("created FIFO", "path", FIFOPath)
 	return nil
 }
 

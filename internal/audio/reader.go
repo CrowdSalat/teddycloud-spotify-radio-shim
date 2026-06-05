@@ -3,6 +3,7 @@
 package audio
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"sync/atomic"
@@ -64,6 +65,51 @@ func (r *Reader) Metrics() *ReaderMetrics {
 // The read buffer is pre-allocated once to avoid GC pressure in the
 // hot path.
 func (r *Reader) Run() error {
+	return r.pump(r.out, true)
+}
+
+// RunInto is like Run but writes into an external channel instead of
+// the Reader's own internal channel. The channel is NOT closed when
+// the source EOF's — the caller owns the channel lifetime. Use this
+// when the channel must outlive a single FIFO session (e.g. across
+// go-librespot restarts).
+func (r *Reader) RunInto(ctx context.Context, out chan<- []byte) error {
+	buf := make([]byte, ChunkSize)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		n, err := r.source.Read(buf)
+
+		if n > 0 {
+			r.metrics.BytesRead.Add(uint64(n))
+			chunk := make([]byte, n)
+			copy(chunk, buf[:n])
+
+			select {
+			case out <- chunk:
+			default:
+				r.metrics.BytesDiscarded.Add(uint64(n))
+				r.metrics.ChunksDiscarded.Add(1)
+			}
+		}
+
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+	}
+}
+
+// pump is the shared read loop. If closeOnDone is true the channel is
+// closed when the source returns EOF (used by Run for tests).
+func (r *Reader) pump(out chan []byte, closeOnDone bool) error {
 	buf := make([]byte, ChunkSize)
 
 	for {
@@ -72,22 +118,21 @@ func (r *Reader) Run() error {
 		if n > 0 {
 			r.metrics.BytesRead.Add(uint64(n))
 
-			// Copy the data — buf is reused on the next iteration.
 			chunk := make([]byte, n)
 			copy(chunk, buf[:n])
 
 			select {
-			case r.out <- chunk:
-				// Sent to consumer.
+			case out <- chunk:
 			default:
-				// Channel full — discard to keep the FIFO draining.
 				r.metrics.BytesDiscarded.Add(uint64(n))
 				r.metrics.ChunksDiscarded.Add(1)
 			}
 		}
 
 		if err != nil {
-			close(r.out)
+			if closeOnDone {
+				close(out)
+			}
 			if err == io.EOF {
 				return nil
 			}
