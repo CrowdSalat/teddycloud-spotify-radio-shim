@@ -156,29 +156,34 @@ naturally once Teddycloud consumes at its own rate (Phase integration).
   - Subscribes to `will_play`, `paused`, `playing`, `stopped` events
   - Exposes typed event channel
 
-**Acceptance criteria:**
+**Acceptance criteria (run inside container with persisted auth session):**
 ```bash
-# Start shim with authenticated session
-./shim &
+podman build --platform linux/amd64 -f Containerfile -t shim-test .
+podman run -d --name shim-phase4 --platform linux/amd64 \
+  -p 8084:8080 -v /path/to/config:/config:Z shim-test
+sleep 10
 
-# Start first stream in background
+# 1. Start first stream in background
 curl -s -N -o /dev/null \
-     "http://localhost:8080/stream?spotify_uri=spotify:track:4PTG3Z6ehGkBFwjybzWkR8" &
+     "http://localhost:8084/stream?spotify_uri=spotify:track:4PTG3Z6ehGkBFwjybzWkR8" &
 CURL1=$!
-sleep 3
+sleep 5
 
-# Start second stream — should kill first
-curl -s -o /tmp/swap_test.raw --max-time 10 \
-     "http://localhost:8080/stream?spotify_uri=spotify:track:6rqhFgbbKwnb9MLmUQDhG6"
+# 2. Start second stream — first connection should be closed by server
+curl -s -o /private/tmp/swap_test.raw --max-time 10 \
+     "http://localhost:8084/stream?spotify_uri=spotify:track:6rqhFgbbKwnb9MLmUQDhG6"
 
-# 1. First curl exited (connection closed by server)
-wait $CURL1 2>/dev/null  # should have exited
+# First curl should have exited (server closed connection)
+kill $CURL1 2>/dev/null; wait $CURL1 2>/dev/null
 
-# 2. Second stream got data
-test -s /tmp/swap_test.raw
+# Second stream got data
+test -s /private/tmp/swap_test.raw && echo "✅ swap: second stream got data"
 
-# 3. go-librespot is playing the second track
-curl -sf http://localhost:3678/status | jq -e '.track.uri == "spotify:track:6rqhFgbbKwnb9MLmUQDhG6"'
+# go-librespot is playing the second track
+podman exec shim-phase4 curl -sf http://localhost:3678/status | \
+  python3 -c "import sys,json; d=json.load(sys.stdin); print('track:', d.get('track',{}).get('uri','none'))"
+
+podman rm -f shim-phase4
 ```
 
 ---

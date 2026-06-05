@@ -68,7 +68,11 @@ func main() {
 	}()
 
 	client := librespot.New("http://localhost:3678")
-	streamHandler := server.NewStreamHandler(client, audioCh, logger)
+
+	events := librespot.NewEvents("http://localhost:3678", logger)
+	go events.Run(ctx)
+
+	streamHandler := server.NewStreamHandler(client, events, audioCh, logger)
 
 	mux := http.NewServeMux()
 	mux.Handle("/stream", streamHandler)
