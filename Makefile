@@ -17,5 +17,11 @@ lint:
 container:
 	podman build --platform linux/amd64,linux/arm64 -f Containerfile -t $(IMAGE):$(VERSION) .
 
+# Run container-based integration tests.
+# Pass CONFIG_DIR to include Phase 3/4 tests (require Spotify auth):
+#   make test-integration CONFIG_DIR=/path/to/config
+test-integration:
+	./scripts/test-integration.sh $(if $(CONFIG_DIR),--config-dir $(CONFIG_DIR),)
+
 clean:
 	rm -rf bin/
