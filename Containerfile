@@ -29,7 +29,7 @@ FROM docker.io/library/debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libogg0 libvorbis0a libvorbisenc2 libflac12 libasound2 \
-        tini ca-certificates \
+        tini ca-certificates curl procps \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=librespot-build /usr/local/bin/go-librespot /usr/local/bin/

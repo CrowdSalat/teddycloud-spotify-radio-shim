@@ -40,28 +40,31 @@ podman build --platform linux/amd64 -t shim-test .  # exits 0
   - On child exit: restart with exponential backoff (1s → 2s → 4s → cap 30s)
   - Forwards SIGTERM/SIGINT to child, then exits
 
-**Acceptance criteria:**
+**Acceptance criteria (run inside container):**
 ```bash
-# Start the shim (go-librespot binary must be in PATH or built in Phase 0)
-./shim &
-PID=$!
+podman build --platform linux/amd64 -f Containerfile -t shim-test .
+podman run -d --name shim-phase1 --platform linux/amd64 shim-test
 
-# 1. go-librespot starts and API is reachable
-sleep 5
-curl -sf http://localhost:3678/ | jq -e '.playback_ready'
-# → true
+# 1. go-librespot starts and port 3678 is reachable
+#    (GET / blocks until Spotify auth — TCP dial is the correct readiness check)
+sleep 8
+podman exec shim-phase1 bash -c 'echo > /dev/tcp/localhost/3678'
+# → exits 0
 
-# 2. Kill go-librespot, verify shim restarts it
-CHILD=$(pgrep -P $PID go-librespot)
-kill $CHILD
+# 2. Kill go-librespot (SIGKILL — it may ignore SIGTERM while blocked on auth)
+OLD_PID=$(podman exec shim-phase1 pgrep -x go-librespot)
+podman exec shim-phase1 kill -9 $OLD_PID
 sleep 5
-curl -sf http://localhost:3678/ | jq -e '.playback_ready'
-# → true (new process)
+NEW_PID=$(podman exec shim-phase1 pgrep -x go-librespot)
+# → NEW_PID is set and differs from OLD_PID
+podman exec shim-phase1 bash -c 'echo > /dev/tcp/localhost/3678'
+# → exits 0 (port open again)
 
 # 3. Clean shutdown
-kill $PID
-wait $PID
-# → exits 0, no orphan go-librespot
+podman stop -t 5 shim-phase1
+# → exits 0, container state = exited
+
+podman rm shim-phase1
 ```
 
 ---
