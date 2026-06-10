@@ -1,4 +1,4 @@
-package supervisor
+package librespot
 
 import (
 	"context"
@@ -25,18 +25,18 @@ const (
 	backoffMax     = 30 * time.Second
 )
 
-// Supervisor manages the go-librespot child process lifecycle.
-type Supervisor struct {
+// Process manages the go-librespot child process lifecycle.
+type Process struct {
 	configDir string
 	logLevel  string
 	logger    *slog.Logger
 }
 
-// New creates a Supervisor. configDir is where go-librespot's config and
+// NewProcess creates a Process. configDir is where go-librespot's config and
 // session state live (typically a PVC mount). logLevel is passed to
 // go-librespot's config.
-func New(configDir, logLevel string, logger *slog.Logger) *Supervisor {
-	return &Supervisor{
+func NewProcess(configDir, logLevel string, logger *slog.Logger) *Process {
+	return &Process{
 		configDir: configDir,
 		logLevel:  logLevel,
 		logger:    logger,
@@ -47,7 +47,7 @@ func New(configDir, logLevel string, logger *slog.Logger) *Supervisor {
 // It must be called before Run(). After Prepare returns, open the FIFO
 // read end (FIFOPath) in a goroutine before calling Run() — go-librespot
 // opens the write end with O_NONBLOCK and errors if no reader exists.
-func (s *Supervisor) Prepare() error {
+func (s *Process) Prepare() error {
 	if err := s.createFIFO(); err != nil {
 		return fmt.Errorf("create fifo: %w", err)
 	}
@@ -56,7 +56,7 @@ func (s *Supervisor) Prepare() error {
 
 // Run manages go-librespot's lifecycle until ctx is cancelled.
 // Call Prepare() and open the FIFO read end before calling Run().
-func (s *Supervisor) Run(ctx context.Context) error {
+func (s *Process) Run(ctx context.Context) error {
 	backoff := backoffInit
 
 	for {
@@ -90,7 +90,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 
 // runOnce starts go-librespot, waits for readiness, then blocks until it exits
 // or ctx is cancelled.
-func (s *Supervisor) runOnce(ctx context.Context) error {
+func (s *Process) runOnce(ctx context.Context) error {
 	cmd := exec.Command(librespotBin, "--config_dir", s.configDir)
 	cmd.Stdout = &logWriter{logger: s.logger, level: slog.LevelInfo, prefix: "librespot"}
 	cmd.Stderr = &logWriter{logger: s.logger, level: slog.LevelWarn, prefix: "librespot"}
@@ -132,7 +132,7 @@ func (s *Supervisor) runOnce(ctx context.Context) error {
 
 // waitForReady polls the go-librespot API until playback_ready is true,
 // the context is cancelled, or the process exits.
-func (s *Supervisor) waitForReady(ctx context.Context, exited <-chan error) (bool, error) {
+func (s *Process) waitForReady(ctx context.Context, exited <-chan error) (bool, error) {
 	deadline := time.After(readyTimeout)
 
 	for {
@@ -154,7 +154,7 @@ func (s *Supervisor) waitForReady(ctx context.Context, exited <-chan error) (boo
 // checkReady verifies go-librespot's API server is accepting TCP connections.
 // We use a raw TCP dial rather than an HTTP request because GET / blocks
 // until authentication completes and never returns in unauthenticated state.
-func (s *Supervisor) checkReady() bool {
+func (s *Process) checkReady() bool {
 	conn, err := net.DialTimeout("tcp", "localhost:3678", 1*time.Second)
 	if err != nil {
 		return false
@@ -164,7 +164,7 @@ func (s *Supervisor) checkReady() bool {
 }
 
 // shutdownProcess sends SIGTERM and waits for graceful exit, then SIGKILL.
-func (s *Supervisor) shutdownProcess(cmd *exec.Cmd, exited <-chan error) error {
+func (s *Process) shutdownProcess(cmd *exec.Cmd, exited <-chan error) error {
 	if cmd.Process == nil {
 		return nil
 	}
@@ -182,7 +182,7 @@ func (s *Supervisor) shutdownProcess(cmd *exec.Cmd, exited <-chan error) error {
 }
 
 // killProcess force-kills the process (used when startup fails).
-func (s *Supervisor) killProcess(cmd *exec.Cmd) {
+func (s *Process) killProcess(cmd *exec.Cmd) {
 	if cmd.Process != nil {
 		_ = cmd.Process.Kill()
 		// Drain the wait to avoid zombies.
@@ -191,7 +191,7 @@ func (s *Supervisor) killProcess(cmd *exec.Cmd) {
 }
 
 // createFIFO creates the named pipe if it doesn't already exist.
-func (s *Supervisor) createFIFO() error {
+func (s *Process) createFIFO() error {
 	// Remove stale FIFO from a previous run.
 	_ = os.Remove(FIFOPath)
 

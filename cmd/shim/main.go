@@ -12,7 +12,6 @@ import (
 	"github.com/janharings/teddycloud-spotify-radio-shim/internal/audio"
 	"github.com/janharings/teddycloud-spotify-radio-shim/internal/librespot"
 	"github.com/janharings/teddycloud-spotify-radio-shim/internal/server"
-	"github.com/janharings/teddycloud-spotify-radio-shim/internal/supervisor"
 )
 
 // Version is set at build time via -ldflags.
@@ -37,12 +36,12 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
-	sv := supervisor.New(configDir, logLevel, logger)
+	sv := librespot.NewProcess(configDir, logLevel, logger)
 
 	// Prepare creates the FIFO and writes config. Must happen before opening
 	// the FIFO read end and before Run() starts go-librespot.
 	if err := sv.Prepare(); err != nil {
-		logger.Error("supervisor prepare failed", "error", err)
+		logger.Error("librespot process prepare failed", "error", err)
 		os.Exit(1)
 	}
 
@@ -55,9 +54,9 @@ func main() {
 	// go-librespot opens the write end inside sv.Run() below.
 	// Running concurrently avoids a deadlock.
 	go func() {
-		fifo, err := os.Open(supervisor.FIFOPath)
+		fifo, err := os.Open(librespot.FIFOPath)
 		if err != nil {
-			logger.Error("failed to open FIFO", "path", supervisor.FIFOPath, "error", err)
+			logger.Error("failed to open FIFO", "path", librespot.FIFOPath, "error", err)
 			return
 		}
 		defer fifo.Close()
@@ -100,7 +99,7 @@ func main() {
 	}()
 
 	if err := sv.Run(ctx); err != nil && ctx.Err() == nil {
-		logger.Error("supervisor failed", "error", err)
+		logger.Error("librespot process failed", "error", err)
 		os.Exit(1)
 	}
 

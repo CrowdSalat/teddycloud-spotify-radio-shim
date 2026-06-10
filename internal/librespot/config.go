@@ -1,4 +1,4 @@
-package supervisor
+package librespot
 
 import (
 	"fmt"
