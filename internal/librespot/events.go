@@ -49,9 +49,9 @@ const (
 	eventsReconnectDelay = 2 * time.Second
 )
 
-// Events is a long-lived WebSocket client for go-librespot's /events endpoint.
+// EventStream is a long-lived WebSocket client for go-librespot's /events endpoint.
 // It reconnects automatically on drops and fans events out to subscribers.
-type Events struct {
+type EventStream struct {
 	url    string
 	logger *slog.Logger
 
@@ -59,11 +59,11 @@ type Events struct {
 	subs []chan Event
 }
 
-// NewEvents creates an Events client. baseURL is the go-librespot HTTP base
+// NewEventStream creates an EventStream client. baseURL is the go-librespot HTTP base
 // URL (e.g. "http://localhost:3678"); it is converted to a WebSocket URL.
-func NewEvents(baseURL string, logger *slog.Logger) *Events {
+func NewEventStream(baseURL string, logger *slog.Logger) *EventStream {
 	wsURL := "ws" + baseURL[len("http"):] + "/events"
-	return &Events{
+	return &EventStream{
 		url:    wsURL,
 		logger: logger,
 	}
@@ -71,7 +71,7 @@ func NewEvents(baseURL string, logger *slog.Logger) *Events {
 
 // Run connects to the WebSocket, reads events, and fans them out to
 // subscribers until ctx is cancelled. Reconnects automatically on drops.
-func (e *Events) Run(ctx context.Context) {
+func (e *EventStream) Run(ctx context.Context) {
 	for {
 		if err := e.connect(ctx); err != nil {
 			e.logger.Warn("events WebSocket disconnected", "error", err)
@@ -87,7 +87,7 @@ func (e *Events) Run(ctx context.Context) {
 
 // Subscribe returns a channel that receives events. The channel is buffered
 // with capacity 8. Unsubscribe by calling the returned cancel func.
-func (e *Events) Subscribe() (<-chan Event, func()) {
+func (e *EventStream) Subscribe() (<-chan Event, func()) {
 	ch := make(chan Event, 8)
 
 	e.mu.Lock()
@@ -111,7 +111,7 @@ func (e *Events) Subscribe() (<-chan Event, func()) {
 
 // WaitFor blocks until an event matching the predicate arrives or ctx is
 // cancelled. It creates and removes a subscription internally.
-func (e *Events) WaitFor(ctx context.Context, match func(Event) bool) (Event, bool) {
+func (e *EventStream) WaitFor(ctx context.Context, match func(Event) bool) (Event, bool) {
 	ch, cancel := e.Subscribe()
 	defer cancel()
 
@@ -130,7 +130,7 @@ func (e *Events) WaitFor(ctx context.Context, match func(Event) bool) (Event, bo
 	}
 }
 
-func (e *Events) connect(ctx context.Context) error {
+func (e *EventStream) connect(ctx context.Context) error {
 	dialer := websocket.DefaultDialer
 	conn, _, err := dialer.DialContext(ctx, e.url, nil)
 	if err != nil {
@@ -162,7 +162,7 @@ func (e *Events) connect(ctx context.Context) error {
 	}
 }
 
-func (e *Events) dispatch(msg []byte) {
+func (e *EventStream) dispatch(msg []byte) {
 	var raw rawEvent
 	if err := json.Unmarshal(msg, &raw); err != nil {
 		e.logger.Debug("failed to parse event", "error", err, "msg", string(msg))

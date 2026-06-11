@@ -36,11 +36,11 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
-	sv := librespot.NewProcess(configDir, logLevel, logger)
+	librespotProcess := librespot.NewProcess(configDir, logLevel, logger)
 
 	// Prepare creates the FIFO and writes config. Must happen before opening
 	// the FIFO read end and before Run() starts go-librespot.
-	if err := sv.Prepare(); err != nil {
+	if err := librespotProcess.Prepare(); err != nil {
 		logger.Error("librespot process prepare failed", "error", err)
 		os.Exit(1)
 	}
@@ -51,7 +51,7 @@ func main() {
 	audioCh := make(chan []byte, audio.ChannelCapacity)
 
 	// Open the FIFO read end in a goroutine — os.Open blocks until
-	// go-librespot opens the write end inside sv.Run() below.
+	// go-librespot opens the write end inside librespotProcess.Run() below.
 	// Running concurrently avoids a deadlock.
 	go func() {
 		fifo, err := os.Open(librespot.FIFOPath)
@@ -66,12 +66,12 @@ func main() {
 		}
 	}()
 
-	client := librespot.New("http://localhost:3678")
+	librespotClient := librespot.NewClient("http://localhost:3678")
 
-	events := librespot.NewEvents("http://localhost:3678", logger)
-	go events.Run(ctx)
+	eventStream := librespot.NewEventStream("http://localhost:3678", logger)
+	go eventStream.Run(ctx)
 
-	streamHandler := server.NewStreamHandler(client, events, audioCh, logger)
+	streamHandler := server.NewStreamHandler(librespotClient, eventStream, audioCh, logger)
 
 	mux := http.NewServeMux()
 	mux.Handle("/stream", streamHandler)
@@ -98,7 +98,7 @@ func main() {
 		}
 	}()
 
-	if err := sv.Run(ctx); err != nil && ctx.Err() == nil {
+	if err := librespotProcess.Run(ctx); err != nil && ctx.Err() == nil {
 		logger.Error("librespot process failed", "error", err)
 		os.Exit(1)
 	}

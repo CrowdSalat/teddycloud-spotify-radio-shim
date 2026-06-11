@@ -25,7 +25,7 @@ func mockLibrespot(t *testing.T, handler http.HandlerFunc) *librespot.Client {
 	t.Helper()
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
-	return librespot.New(srv.URL)
+	return librespot.NewClient(srv.URL)
 }
 
 // okLibrespot returns a mock that always responds 200.
@@ -38,7 +38,7 @@ func okLibrespot(t *testing.T) *librespot.Client {
 
 // mockEvents returns an Events client backed by a mock WebSocket server
 // and a send function to inject synthetic events.
-func mockEvents(t *testing.T) (*librespot.Events, func(librespot.Event)) {
+func mockEvents(t *testing.T) (*librespot.EventStream, func(librespot.Event)) {
 	t.Helper()
 
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
@@ -58,7 +58,7 @@ func mockEvents(t *testing.T) (*librespot.Events, func(librespot.Event)) {
 	}))
 	t.Cleanup(srv.Close)
 
-	evts := librespot.NewEvents(srv.URL, testLogger())
+	evts := librespot.NewEventStream(srv.URL, testLogger())
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go evts.Run(ctx)

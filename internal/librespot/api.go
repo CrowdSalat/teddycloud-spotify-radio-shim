@@ -18,8 +18,8 @@ type Client struct {
 	httpClient *http.Client
 }
 
-// New creates a Client targeting baseURL (e.g. "http://localhost:3678").
-func New(baseURL string) *Client {
+// NewClient creates a Client targeting baseURL (e.g. "http://localhost:3678").
+func NewClient(baseURL string) *Client {
 	return &Client{
 		baseURL:    baseURL,
 		httpClient: &http.Client{Timeout: defaultTimeout},

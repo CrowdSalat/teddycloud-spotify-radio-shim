@@ -21,10 +21,10 @@ const willPlayTimeout = 10 * time.Second
 // for a will_play event from go-librespot before forwarding any audio
 // bytes, ensuring stale PCM from the previous track is flushed.
 type StreamHandler struct {
-	client *librespot.Client
-	events *librespot.Events
-	audio  <-chan []byte
-	logger *slog.Logger
+	client      *librespot.Client
+	eventStream *librespot.EventStream
+	audioCh     <-chan []byte
+	logger      *slog.Logger
 
 	// mu protects cancelActive.
 	mu           sync.Mutex
@@ -34,15 +34,15 @@ type StreamHandler struct {
 // NewStreamHandler creates a StreamHandler.
 func NewStreamHandler(
 	client *librespot.Client,
-	events *librespot.Events,
+	eventStream *librespot.EventStream,
 	audioCh <-chan []byte,
 	logger *slog.Logger,
 ) *StreamHandler {
 	return &StreamHandler{
-		client: client,
-		events: events,
-		audio:  audioCh,
-		logger: logger,
+		client:      client,
+		eventStream: eventStream,
+		audioCh:     audioCh,
+		logger:      logger,
 	}
 }
 
@@ -60,7 +60,7 @@ func (h *StreamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer h.deactivate()
 
 	// Subscribe to events before calling play so we don't miss will_play.
-	eventCh, unsubscribe := h.events.Subscribe()
+	eventCh, unsubscribe := h.eventStream.Subscribe()
 	defer unsubscribe()
 
 	if err := h.client.Play(ctx, uri); err != nil {
@@ -99,7 +99,7 @@ func (h *StreamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				"remote", r.RemoteAddr,
 			)
 			return
-		case chunk, ok := <-h.audio:
+		case chunk, ok := <-h.audioCh:
 			if !ok {
 				h.logger.Info("audio channel closed", "uri", uri)
 				return
@@ -171,7 +171,7 @@ func (h *StreamHandler) flushChannel() {
 	flushed := 0
 	for {
 		select {
-		case _, ok := <-h.audio:
+		case _, ok := <-h.audioCh:
 			if !ok {
 				return // channel closed
 			}

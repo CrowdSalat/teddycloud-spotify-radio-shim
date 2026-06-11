@@ -12,7 +12,7 @@ func mockServer(t *testing.T, handler http.HandlerFunc) *Client {
 	t.Helper()
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
-	return New(srv.URL)
+	return NewClient(srv.URL)
 }
 
 func TestPlay(t *testing.T) {
