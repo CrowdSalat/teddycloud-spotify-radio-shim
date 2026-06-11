@@ -1,5 +1,5 @@
 // Package server provides the shim's HTTP handlers.
-package server
+package radio
 
 import (
 	"context"
@@ -8,19 +8,18 @@ import (
 	"sync"
 	"time"
 
-	"github.com/janharings/teddycloud-spotify-radio-shim/internal/audio"
 	"github.com/janharings/teddycloud-spotify-radio-shim/internal/librespot"
 )
 
 const willPlayTimeout = 10 * time.Second
 
-// StreamHandler serves GET /stream?spotify_uri=<URI>.
+// PlaybackCoordinator serves GET /stream?spotify_uri=<URI>.
 //
 // At most one stream is active at a time. A new request cancels the
 // previous one before starting. After calling play, the handler waits
 // for a will_play event from go-librespot before forwarding any audio
 // bytes, ensuring stale PCM from the previous track is flushed.
-type StreamHandler struct {
+type PlaybackCoordinator struct {
 	client      *librespot.Client
 	eventStream *librespot.EventStream
 	audioCh     <-chan []byte
@@ -31,14 +30,14 @@ type StreamHandler struct {
 	cancelActive context.CancelFunc
 }
 
-// NewStreamHandler creates a StreamHandler.
-func NewStreamHandler(
+// NewPlaybackCoordinator creates a PlaybackCoordinator.
+func NewPlaybackCoordinator(
 	client *librespot.Client,
 	eventStream *librespot.EventStream,
 	audioCh <-chan []byte,
 	logger *slog.Logger,
-) *StreamHandler {
-	return &StreamHandler{
+) *PlaybackCoordinator {
+	return &PlaybackCoordinator{
 		client:      client,
 		eventStream: eventStream,
 		audioCh:     audioCh,
@@ -46,7 +45,7 @@ func NewStreamHandler(
 	}
 }
 
-func (h *StreamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (h *PlaybackCoordinator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	uri := r.URL.Query().Get("spotify_uri")
 	if uri == "" {
 		http.Error(w, "missing spotify_uri query parameter", http.StatusBadRequest)
@@ -78,11 +77,11 @@ func (h *StreamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	h.flushChannel()
 
-	w.Header().Set("Content-Type", audio.ContentType)
+	w.Header().Set("Content-Type", ContentType)
 	w.Header().Set("Transfer-Encoding", "chunked")
 	w.WriteHeader(http.StatusOK)
 
-	if err := audio.WriteStreamingWAVHeader(w); err != nil {
+	if err := WriteStreamingWAVHeader(w); err != nil {
 		h.logger.Error("failed to write WAV header", "error", err)
 		return
 	}
@@ -122,7 +121,7 @@ func (h *StreamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // activate cancels the previous active stream and registers this request's
 // context. Returns a new context that is cancelled when the stream should end
 // (either by a new request or by the client disconnecting).
-func (h *StreamHandler) activate(parent context.Context) context.Context {
+func (h *PlaybackCoordinator) activate(parent context.Context) context.Context {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -136,7 +135,7 @@ func (h *StreamHandler) activate(parent context.Context) context.Context {
 }
 
 // deactivate clears the active cancel func if it is still this stream's.
-func (h *StreamHandler) deactivate() {
+func (h *PlaybackCoordinator) deactivate() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	// Don't nil cancelActive — a newer stream may have already replaced it.
@@ -144,7 +143,7 @@ func (h *StreamHandler) deactivate() {
 
 // waitWillPlay blocks until a will_play event for uri arrives or the context
 // or timeout expires. Returns true if will_play was received.
-func (h *StreamHandler) waitWillPlay(ctx context.Context, ch <-chan librespot.Event, uri string) bool {
+func (h *PlaybackCoordinator) waitWillPlay(ctx context.Context, ch <-chan librespot.Event, uri string) bool {
 	deadline := time.NewTimer(willPlayTimeout)
 	defer deadline.Stop()
 
@@ -167,7 +166,7 @@ func (h *StreamHandler) waitWillPlay(ctx context.Context, ch <-chan librespot.Ev
 
 // flushChannel drains all currently buffered chunks from the audio channel
 // non-blocking. Called after a track switch to discard stale PCM.
-func (h *StreamHandler) flushChannel() {
+func (h *PlaybackCoordinator) flushChannel() {
 	flushed := 0
 	for {
 		select {

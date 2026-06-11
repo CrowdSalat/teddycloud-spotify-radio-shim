@@ -1,4 +1,4 @@
-package server
+package radio
 
 import (
 	"bytes"
@@ -94,7 +94,7 @@ func TestStreamMissingURI(t *testing.T) {
 	})
 	evts, _ := mockEvents(t)
 
-	h := NewStreamHandler(client, evts, make(chan []byte), testLogger())
+	h := NewPlaybackCoordinator(client, evts, make(chan []byte), testLogger())
 	req := httptest.NewRequest(http.MethodGet, "/stream", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -114,7 +114,7 @@ func TestStreamPlayError(t *testing.T) {
 	})
 	evts, _ := mockEvents(t)
 
-	h := NewStreamHandler(client, evts, make(chan []byte), testLogger())
+	h := NewPlaybackCoordinator(client, evts, make(chan []byte), testLogger())
 	req := httptest.NewRequest(http.MethodGet, "/stream?spotify_uri=spotify:track:abc", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -144,7 +144,7 @@ func TestStreamContentTypeAndWAVHeader(t *testing.T) {
 	evts, send := mockEvents(t)
 	ch := make(chan []byte, audio.ChannelCapacity)
 
-	h := NewStreamHandler(okLibrespot(t), evts, ch, testLogger())
+	h := NewPlaybackCoordinator(okLibrespot(t), evts, ch, testLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	req := httptest.NewRequest(http.MethodGet, "/stream?spotify_uri="+uri, nil)
@@ -201,7 +201,7 @@ func TestStreamClientDisconnect(t *testing.T) {
 	const uri = "spotify:track:abc"
 	evts, send := mockEvents(t)
 
-	h := NewStreamHandler(okLibrespot(t), evts, make(chan []byte), testLogger())
+	h := NewPlaybackCoordinator(okLibrespot(t), evts, make(chan []byte), testLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	req := httptest.NewRequest(http.MethodGet, "/stream?spotify_uri="+uri, nil)
@@ -233,7 +233,7 @@ func TestStreamChannelClose(t *testing.T) {
 	ch := make(chan []byte)
 	close(ch)
 
-	h := NewStreamHandler(okLibrespot(t), evts, ch, testLogger())
+	h := NewPlaybackCoordinator(okLibrespot(t), evts, ch, testLogger())
 	req := httptest.NewRequest(http.MethodGet, "/stream?spotify_uri="+uri, nil)
 
 	done := make(chan struct{})
@@ -261,7 +261,7 @@ func TestStreamHotSwap(t *testing.T) {
 	evts, send := mockEvents(t)
 	ch := make(chan []byte, audio.ChannelCapacity)
 
-	h := NewStreamHandler(okLibrespot(t), evts, ch, testLogger())
+	h := NewPlaybackCoordinator(okLibrespot(t), evts, ch, testLogger())
 
 	// Start first stream.
 	ctx1, cancel1 := context.WithCancel(context.Background())

@@ -9,9 +9,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/janharings/teddycloud-spotify-radio-shim/internal/audio"
 	"github.com/janharings/teddycloud-spotify-radio-shim/internal/librespot"
-	"github.com/janharings/teddycloud-spotify-radio-shim/internal/server"
+	"github.com/janharings/teddycloud-spotify-radio-shim/internal/radio"
 )
 
 // Version is set at build time via -ldflags.
@@ -48,7 +47,7 @@ func main() {
 	// The FIFO channel carries audio chunks from go-librespot to the HTTP
 	// handler. The channel is created here so the HTTP server can start
 	// before the FIFO is open.
-	audioCh := make(chan []byte, audio.ChannelCapacity)
+	audioCh := make(chan []byte, radio.ChannelCapacity)
 
 	// Open the FIFO read end in a goroutine — os.Open blocks until
 	// go-librespot opens the write end inside librespotProcess.Run() below.
@@ -60,7 +59,7 @@ func main() {
 			return
 		}
 		defer fifo.Close()
-		reader := audio.NewReader(fifo, logger)
+		reader := radio.NewReader(fifo, logger)
 		if err := reader.RunInto(ctx, audioCh); err != nil && ctx.Err() == nil {
 			logger.Error("audio reader stopped", "error", err)
 		}
@@ -71,7 +70,7 @@ func main() {
 	eventStream := librespot.NewEventStream("http://localhost:3678", logger)
 	go eventStream.Run(ctx)
 
-	streamHandler := server.NewStreamHandler(librespotClient, eventStream, audioCh, logger)
+	streamHandler := radio.NewPlaybackCoordinator(librespotClient, eventStream, audioCh, logger)
 
 	mux := http.NewServeMux()
 	mux.Handle("/stream", streamHandler)
