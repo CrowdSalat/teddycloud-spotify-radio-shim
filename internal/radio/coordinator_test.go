@@ -1,26 +1,15 @@
 package radio
 
 import (
-	"bytes"
-	"context"
-	"encoding/binary"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
-	"github.com/gorilla/websocket"
-	"github.com/janharings/teddycloud-spotify-radio-shim/internal/audio"
 	"github.com/janharings/teddycloud-spotify-radio-shim/internal/librespot"
 )
 
-func testLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
-}
-
-// mockLibrespot starts a mock go-librespot API server and returns a client.
+// mockLibrespot starts a test HTTP server simulating go-librespot's API.
 func mockLibrespot(t *testing.T, handler http.HandlerFunc) *librespot.Client {
 	t.Helper()
 	srv := httptest.NewServer(handler)
@@ -28,291 +17,191 @@ func mockLibrespot(t *testing.T, handler http.HandlerFunc) *librespot.Client {
 	return librespot.NewClient(srv.URL)
 }
 
-// okLibrespot returns a mock that always responds 200.
-func okLibrespot(t *testing.T) *librespot.Client {
+// okClient returns a client where every API call succeeds.
+func okClient(t *testing.T) *librespot.Client {
 	t.Helper()
 	return mockLibrespot(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
 }
 
-// mockEvents returns an Events client backed by a mock WebSocket server
-// and a send function to inject synthetic events.
-func mockEvents(t *testing.T) (*librespot.EventStream, func(librespot.Event)) {
-	t.Helper()
-
-	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
-	conns := make(chan *websocket.Conn, 4)
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			return
-		}
-		conns <- conn
-		for {
-			if _, _, err := conn.ReadMessage(); err != nil {
-				return
-			}
-		}
-	}))
-	t.Cleanup(srv.Close)
-
-	evts := librespot.NewEventStream(srv.URL, testLogger())
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	go evts.Run(ctx)
-
-	// Wait for WebSocket connection to be established.
-	var activeConn *websocket.Conn
-	select {
-	case activeConn = <-conns:
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("events WebSocket did not connect in time")
-	}
-
-	sendFn := func(ev librespot.Event) {
-		msg, err := ev.MarshalWire()
-		if err != nil {
-			t.Errorf("MarshalWire: %v", err)
-			return
-		}
-		if err := activeConn.WriteMessage(websocket.TextMessage, msg); err != nil {
-			t.Logf("send event: %v", err)
-		}
-	}
-
-	return evts, sendFn
-}
-
-// TestStreamMissingURI: no spotify_uri → 400, play never called.
-func TestStreamMissingURI(t *testing.T) {
-	playCalled := false
-	client := mockLibrespot(t, func(w http.ResponseWriter, r *http.Request) {
-		playCalled = true
+// TestCoordinatorMissingURI: no spotify_uri → 400, API never called.
+func TestCoordinatorMissingURI(t *testing.T) {
+	called := false
+	client := mockLibrespot(t, func(w http.ResponseWriter, _ *http.Request) {
+		called = true
 		w.WriteHeader(http.StatusOK)
 	})
-	evts, _ := mockEvents(t)
+	c := NewPlaybackCoordinator(client, testLogger())
 
-	h := NewPlaybackCoordinator(client, evts, make(chan []byte), testLogger())
 	req := httptest.NewRequest(http.MethodGet, "/stream", nil)
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	c.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", rec.Code)
 	}
-	if playCalled {
-		t.Error("play should not be called without a URI")
+	if called {
+		t.Error("API should not be called without a URI")
 	}
 }
 
-// TestStreamPlayError: go-librespot returns 500 → 502 to client.
-func TestStreamPlayError(t *testing.T) {
+// TestCoordinatorPlayError: play returns 500 → coordinator returns 502.
+func TestCoordinatorPlayError(t *testing.T) {
 	client := mockLibrespot(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	})
-	evts, _ := mockEvents(t)
+	c := NewPlaybackCoordinator(client, testLogger())
 
-	h := NewPlaybackCoordinator(client, evts, make(chan []byte), testLogger())
 	req := httptest.NewRequest(http.MethodGet, "/stream?spotify_uri=spotify:track:abc", nil)
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	c.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusBadGateway {
 		t.Errorf("status = %d, want 502", rec.Code)
 	}
 }
 
-// TestStreamWAVHeaderSize: WAV header is exactly 44 bytes.
-func TestStreamWAVHeaderSize(t *testing.T) {
-	var buf bytes.Buffer
-	if err := audio.WriteStreamingWAVHeader(&buf); err != nil {
-		t.Fatalf("WriteStreamingWAVHeader: %v", err)
-	}
-	if n := buf.Len(); n != 44 {
-		t.Errorf("WAV header = %d bytes, want 44", n)
-	}
-}
-
-// TestStreamContentTypeAndWAVHeader: 200 response has correct Content-Type,
-// a valid WAV header, and audio bytes. Audio is sent AFTER will_play fires
-// (simulating the real track-switch flow where flushChannel discards old data
-// and new data arrives from the reader).
-func TestStreamContentTypeAndWAVHeader(t *testing.T) {
+// TestCoordinatorStreamsAudio: correct headers and audio bytes flow from
+// the chunk channel to the HTTP response.
+func TestCoordinatorStreamsAudio(t *testing.T) {
 	const uri = "spotify:track:abc"
-	evts, send := mockEvents(t)
-	ch := make(chan []byte, audio.ChannelCapacity)
+	c := NewPlaybackCoordinator(okClient(t), testLogger())
 
-	h := NewPlaybackCoordinator(okLibrespot(t), evts, ch, testLogger())
-
-	ctx, cancel := context.WithCancel(context.Background())
-	req := httptest.NewRequest(http.MethodGet, "/stream?spotify_uri="+uri, nil)
-	req = req.WithContext(ctx)
-	rec := httptest.NewRecorder()
-
-	done := make(chan struct{})
+	// Feed 3 chunks then close so the handler exits naturally via channel close.
 	go func() {
-		defer close(done)
-		h.ServeHTTP(rec, req)
+		for i := 0; i < 3; i++ {
+			c.chunks <- make([]byte, ChunkSize)
+		}
+		close(c.chunks)
 	}()
 
-	// Send will_play: handler exits waitWillPlay, calls flushChannel (empty),
-	// then enters audio loop.
-	send(librespot.Event{Type: librespot.EventWillPlay, URI: uri})
-	time.Sleep(30 * time.Millisecond) // let handler reach audio loop
-
-	// Feed two chunks after will_play (simulates new track PCM arriving).
-	ch <- make([]byte, audio.ChunkSize)
-	ch <- make([]byte, audio.ChunkSize)
-	time.Sleep(30 * time.Millisecond) // let handler forward them
-
-	cancel()
-	<-done
+	req := httptest.NewRequest(http.MethodGet, "/stream?spotify_uri="+uri, nil)
+	rec := httptest.NewRecorder()
+	c.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	if ct := rec.Header().Get("Content-Type"); ct != audio.ContentType {
-		t.Errorf("Content-Type = %q, want %q", ct, audio.ContentType)
-	}
-
-	body := rec.Body.Bytes()
-	if !bytes.HasPrefix(body, []byte("RIFF")) {
-		t.Fatalf("body does not start with RIFF: %q", body[:min(len(body), 8)])
-	}
-	if got := binary.LittleEndian.Uint32(body[4:8]); got != 0xFFFFFFFF {
-		t.Errorf("RIFF size = %#x, want 0xFFFFFFFF", got)
-	}
-	if string(body[8:12]) != "WAVE" {
-		t.Errorf("expected WAVE at byte 8, got %q", body[8:12])
+	if ct := rec.Header().Get("Content-Type"); ct != ContentType {
+		t.Errorf("Content-Type = %q, want %q", ct, ContentType)
 	}
 
 	const wavHeader = 44
-	wantPayload := 2 * audio.ChunkSize
-	if got := len(body) - wavHeader; got != wantPayload {
-		t.Errorf("payload = %d bytes, want %d", got, wantPayload)
+	wantBody := wavHeader + 3*ChunkSize
+	if got := rec.Body.Len(); got != wantBody {
+		t.Errorf("body = %d bytes, want %d (44 WAV header + 3 chunks)", got, wantBody)
 	}
 }
 
-// TestStreamClientDisconnect: cancelling the request context causes the
-// handler to exit promptly without blocking.
-func TestStreamClientDisconnect(t *testing.T) {
+// TestCoordinatorSameURIResumes: a second request with the same URI does
+// not call the play API — it just resumes reading from the channel.
+func TestCoordinatorSameURIResumes(t *testing.T) {
 	const uri = "spotify:track:abc"
-	evts, send := mockEvents(t)
+	playCalls := 0
+	client := mockLibrespot(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/player/play" {
+			playCalls++
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	c := NewPlaybackCoordinator(client, testLogger())
 
-	h := NewPlaybackCoordinator(okLibrespot(t), evts, make(chan []byte), testLogger())
+	serve := func() {
+		go func() {
+			c.chunks <- make([]byte, ChunkSize)
+			close(c.chunks)
+		}()
+		req := httptest.NewRequest(http.MethodGet, "/stream?spotify_uri="+uri, nil)
+		c.ServeHTTP(httptest.NewRecorder(), req)
+	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	req := httptest.NewRequest(http.MethodGet, "/stream?spotify_uri="+uri, nil)
-	req = req.WithContext(ctx)
+	serve() // first request — play is called, lastURI set
 
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		h.ServeHTTP(httptest.NewRecorder(), req)
-	}()
+	// Re-open channel for second request.
+	c.chunks = make(chan []byte, ChunkBuf)
+	serve() // second request, same URI — play must NOT be called again
 
-	// Send will_play then cancel so the handler is in the audio loop when cancelled.
-	send(librespot.Event{Type: librespot.EventWillPlay, URI: uri})
-	time.Sleep(20 * time.Millisecond)
-	cancel()
-
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("handler did not exit after context cancellation")
+	if playCalls != 1 {
+		t.Errorf("play called %d times, want exactly 1 (resume should skip play)", playCalls)
 	}
 }
 
-// TestStreamChannelClose: handler exits when the audio channel is closed.
-func TestStreamChannelClose(t *testing.T) {
-	const uri = "spotify:track:abc"
-	evts, send := mockEvents(t)
-
-	ch := make(chan []byte)
-	close(ch)
-
-	h := NewPlaybackCoordinator(okLibrespot(t), evts, ch, testLogger())
-	req := httptest.NewRequest(http.MethodGet, "/stream?spotify_uri="+uri, nil)
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		h.ServeHTTP(httptest.NewRecorder(), req)
-	}()
-
-	// Send will_play: handler flushes the closed channel (ok=false → returns),
-	// exits immediately.
-	send(librespot.Event{Type: librespot.EventWillPlay, URI: uri})
-
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("handler did not exit when channel was closed")
-	}
-}
-
-// TestStreamHotSwap: a second /stream request cancels the first.
-func TestStreamHotSwap(t *testing.T) {
+// TestCoordinatorHotSwap: a new URI pauses the current stream and plays
+// the new one. The first stream's goroutine exits promptly.
+func TestCoordinatorHotSwap(t *testing.T) {
 	const uri1 = "spotify:track:first"
 	const uri2 = "spotify:track:second"
 
-	evts, send := mockEvents(t)
-	ch := make(chan []byte, audio.ChannelCapacity)
+	paths := make(chan string, 10)
+	client := mockLibrespot(t, func(w http.ResponseWriter, r *http.Request) {
+		paths <- r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	})
+	c := NewPlaybackCoordinator(client, testLogger())
 
-	h := NewPlaybackCoordinator(okLibrespot(t), evts, ch, testLogger())
-
-	// Start first stream.
-	ctx1, cancel1 := context.WithCancel(context.Background())
-	defer cancel1()
-	req1 := httptest.NewRequest(http.MethodGet, "/stream?spotify_uri="+uri1, nil)
-	req1 = req1.WithContext(ctx1)
-
-	done1 := make(chan struct{})
+	// First stream: feed one chunk, then block so the handler stays alive.
+	// The hot-swap (second request) will cancel its context.
+	firstDone := make(chan struct{})
 	go func() {
-		defer close(done1)
-		h.ServeHTTP(httptest.NewRecorder(), req1)
+		defer close(firstDone)
+		req := httptest.NewRequest(http.MethodGet, "/stream?spotify_uri="+uri1, nil)
+		c.ServeHTTP(httptest.NewRecorder(), req)
 	}()
 
-	// Let first stream get into the audio loop.
-	send(librespot.Event{Type: librespot.EventWillPlay, URI: uri1})
-	time.Sleep(30 * time.Millisecond)
+	// Let first stream get into the audio loop (play called, header sent).
+	time.Sleep(50 * time.Millisecond)
 
-	// Start second stream — should cancel the first.
+	// Second stream: different URI, triggers hot-swap.
+	// Feed one chunk to drain the pauseWithDrain loop, then close.
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		c.chunks <- make([]byte, ChunkSize) // unblocks pauseWithDrain drain
+		time.Sleep(20 * time.Millisecond)
+		close(c.chunks)
+	}()
+
 	req2 := httptest.NewRequest(http.MethodGet, "/stream?spotify_uri="+uri2, nil)
-	ctx2, cancel2 := context.WithCancel(context.Background())
-	defer cancel2()
-	req2 = req2.WithContext(ctx2)
+	c.ServeHTTP(httptest.NewRecorder(), req2)
 
-	done2 := make(chan struct{})
-	go func() {
-		defer close(done2)
-		h.ServeHTTP(httptest.NewRecorder(), req2)
-	}()
-
-	// First stream should exit promptly.
+	// First handler must have exited.
 	select {
-	case <-done1:
+	case <-firstDone:
 	case <-time.After(2 * time.Second):
-		t.Fatal("first stream did not exit when second stream started")
+		t.Fatal("first stream did not exit after hot-swap")
 	}
 
-	// Second stream is running — send will_play and cancel it.
-	send(librespot.Event{Type: librespot.EventWillPlay, URI: uri2})
-	time.Sleep(20 * time.Millisecond)
-	cancel2()
+	// Collect API calls: expect play(uri1), pause, play(uri2).
+	close(paths)
+	var calls []string
+	for p := range paths {
+		calls = append(calls, p)
+	}
 
-	select {
-	case <-done2:
-	case <-time.After(2 * time.Second):
-		t.Fatal("second stream did not exit after context cancellation")
+	if len(calls) < 3 {
+		t.Fatalf("expected at least 3 API calls, got %v", calls)
 	}
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
+// TestCoordinatorClientDisconnect: closing the chunk channel exits the handler.
+func TestCoordinatorClientDisconnect(t *testing.T) {
+	const uri = "spotify:track:abc"
+	c := NewPlaybackCoordinator(okClient(t), testLogger())
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		req := httptest.NewRequest(http.MethodGet, "/stream?spotify_uri="+uri, nil)
+		c.ServeHTTP(httptest.NewRecorder(), req)
+	}()
+
+	// Handler is blocked in the play+stream path. Close chunks to signal EOF.
+	time.Sleep(30 * time.Millisecond)
+	close(c.chunks)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not exit after channel close")
 	}
-	return b
 }

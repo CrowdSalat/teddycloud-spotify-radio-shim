@@ -5,83 +5,89 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
-	"time"
 
 	"github.com/janharings/teddycloud-spotify-radio-shim/internal/librespot"
 )
 
-const willPlayTimeout = 10 * time.Second
-
 // PlaybackCoordinator serves GET /stream?spotify_uri=<URI>.
 //
-// At most one stream is active at a time. A new request cancels the
-// previous one before starting. After calling play, the handler waits
-// for a will_play event from go-librespot before forwarding any audio
-// bytes, ensuring stale PCM from the previous track is flushed.
+// Play and pause are driven by backpressure: Teddycloud opens the HTTP
+// connection to play and closes it to pause. The FIFO fills naturally when
+// nobody reads, throttling go-librespot without any API call.
+//
+// For hot-swap (different URI while something is playing), the coordinator
+// calls pauseWithDrain to safely pause go-librespot — avoiding the pipe
+// driver deadlock — before starting the new track.
+//
+// At most one stream is active at a time. A new request cancels the previous.
 type PlaybackCoordinator struct {
-	client      *librespot.Client
-	eventStream *librespot.EventStream
-	audioCh     <-chan []byte
-	logger      *slog.Logger
+	client *librespot.Client
+	chunks chan []byte
+	logger *slog.Logger
 
-	// mu protects cancelActive.
 	mu           sync.Mutex
+	lastURI      string
 	cancelActive context.CancelFunc
 }
 
 // NewPlaybackCoordinator creates a PlaybackCoordinator.
-func NewPlaybackCoordinator(
-	client *librespot.Client,
-	eventStream *librespot.EventStream,
-	audioCh <-chan []byte,
-	logger *slog.Logger,
-) *PlaybackCoordinator {
+// The caller must start a Reader goroutine that sends to Chunks().
+func NewPlaybackCoordinator(client *librespot.Client, logger *slog.Logger) *PlaybackCoordinator {
 	return &PlaybackCoordinator{
-		client:      client,
-		eventStream: eventStream,
-		audioCh:     audioCh,
-		logger:      logger,
+		client: client,
+		chunks: make(chan []byte, ChunkBuf),
+		logger: logger,
 	}
 }
 
-func (h *PlaybackCoordinator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+// Chunks returns the write end of the audio channel. The FIFO reader
+// goroutine sends decoded PCM chunks here; the HTTP handler reads them.
+func (c *PlaybackCoordinator) Chunks() chan<- []byte {
+	return c.chunks
+}
+
+func (c *PlaybackCoordinator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	uri := r.URL.Query().Get("spotify_uri")
 	if uri == "" {
 		http.Error(w, "missing spotify_uri query parameter", http.StatusBadRequest)
 		return
 	}
 
-	h.logger.Info("stream requested", "uri", uri, "remote", r.RemoteAddr)
+	c.logger.Info("stream requested", "uri", uri, "remote", r.RemoteAddr)
 
-	// Cancel any previously active stream, then register this one.
-	ctx := h.activate(r.Context())
-	defer h.deactivate()
+	ctx := c.activate(r.Context())
+	defer c.deactivate()
 
-	// Subscribe to events before calling play so we don't miss will_play.
-	eventCh, unsubscribe := h.eventStream.Subscribe()
-	defer unsubscribe()
-
-	if err := h.client.Play(ctx, uri); err != nil {
-		h.logger.Error("play failed", "uri", uri, "error", err)
-		http.Error(w, "failed to start playback: "+err.Error(), http.StatusBadGateway)
-		return
+	c.mu.Lock()
+	sameURI := c.lastURI == uri
+	wasPlaying := c.lastURI != ""
+	if !sameURI {
+		c.lastURI = uri
 	}
+	c.mu.Unlock()
 
-	// Wait for will_play for our URI before forwarding audio bytes.
-	// This ensures stale PCM from the previous track is not sent.
-	if !h.waitWillPlay(ctx, eventCh, uri) {
-		h.logger.Info("timed out waiting for will_play, flushing and continuing",
-			"uri", uri)
-		// Flush whatever is in the channel before proceeding.
+	if !sameURI {
+		if wasPlaying {
+			// Hot-swap: safely pause go-librespot (draining chunks concurrently
+			// to prevent the pipe driver deadlock), then start the new track.
+			if err := c.pauseWithDrain(ctx); err != nil && ctx.Err() == nil {
+				c.logger.Warn("pause failed during hot-swap", "error", err)
+			}
+		}
+		if err := c.client.Play(ctx, uri); err != nil {
+			c.logger.Error("play failed", "uri", uri, "error", err)
+			http.Error(w, "play failed: "+err.Error(), http.StatusBadGateway)
+			return
+		}
 	}
-	h.flushChannel()
+	// Same URI: backpressure releases the moment we start reading — go-librespot
+	// resumes from exactly where it was blocked. No API call needed.
 
 	w.Header().Set("Content-Type", ContentType)
-	w.Header().Set("Transfer-Encoding", "chunked")
 	w.WriteHeader(http.StatusOK)
 
 	if err := WriteStreamingWAVHeader(w); err != nil {
-		h.logger.Error("failed to write WAV header", "error", err)
+		c.logger.Error("failed to write WAV header", "error", err)
 		return
 	}
 
@@ -91,19 +97,18 @@ func (h *PlaybackCoordinator) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	for {
 		select {
 		case <-ctx.Done():
-			h.logger.Info("stream ended",
+			c.logger.Info("stream ended",
 				"uri", uri,
 				"bytes_sent", bytesSent,
 				"remote", r.RemoteAddr,
 			)
 			return
-		case chunk, ok := <-h.audioCh:
+		case chunk, ok := <-c.chunks:
 			if !ok {
-				h.logger.Info("audio channel closed", "uri", uri)
 				return
 			}
 			if _, err := w.Write(chunk); err != nil {
-				h.logger.Info("write error, client disconnected",
+				c.logger.Info("client disconnected",
 					"uri", uri,
 					"error", err,
 				)
@@ -117,68 +122,46 @@ func (h *PlaybackCoordinator) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
-// activate cancels the previous active stream and registers this request's
-// context. Returns a new context that is cancelled when the stream should end
-// (either by a new request or by the client disconnecting).
-func (h *PlaybackCoordinator) activate(parent context.Context) context.Context {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	if h.cancelActive != nil {
-		h.cancelActive()
+// activate cancels the previous active stream and registers this one.
+func (c *PlaybackCoordinator) activate(parent context.Context) context.Context {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cancelActive != nil {
+		c.cancelActive()
 	}
-
 	ctx, cancel := context.WithCancel(parent)
-	h.cancelActive = cancel
+	c.cancelActive = cancel
 	return ctx
 }
 
-// deactivate clears the active cancel func if it is still this stream's.
-func (h *PlaybackCoordinator) deactivate() {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	// Don't nil cancelActive — a newer stream may have already replaced it.
+func (c *PlaybackCoordinator) deactivate() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// Intentionally empty: cancelActive stays set for the next activate call.
 }
 
-// waitWillPlay blocks until a will_play event for uri arrives or the context
-// or timeout expires. Returns true if will_play was received.
-func (h *PlaybackCoordinator) waitWillPlay(ctx context.Context, ch <-chan librespot.Event, uri string) bool {
-	deadline := time.NewTimer(willPlayTimeout)
-	defer deadline.Stop()
+// pauseWithDrain sends a pause command to go-librespot while concurrently
+// draining the chunk channel. This is required because go-librespot's pipe
+// driver holds out.lock across file.Write() calls. If the FIFO is full,
+// Write() blocks and all API calls (including pause) deadlock.
+//
+// Draining the channel unblocks the reader goroutine, which reads from the
+// FIFO, which lets go-librespot's Write() complete, which releases out.lock,
+// which allows the pause command to proceed.
+func (c *PlaybackCoordinator) pauseWithDrain(ctx context.Context) error {
+	done := make(chan error, 1)
+	go func() {
+		done <- c.client.Pause(ctx)
+	}()
 
 	for {
 		select {
-		case <-ctx.Done():
-			return false
-		case <-deadline.C:
-			return false
-		case ev, ok := <-ch:
-			if !ok {
-				return false
-			}
-			if ev.Type == librespot.EventWillPlay && ev.URI == uri {
-				return true
-			}
-		}
-	}
-}
-
-// flushChannel drains all currently buffered chunks from the audio channel
-// non-blocking. Called after a track switch to discard stale PCM.
-func (h *PlaybackCoordinator) flushChannel() {
-	flushed := 0
-	for {
-		select {
-		case _, ok := <-h.audioCh:
-			if !ok {
-				return // channel closed
-			}
-			flushed++
-		default:
-			if flushed > 0 {
-				h.logger.Debug("flushed stale audio chunks", "count", flushed)
-			}
-			return
+		case err := <-done:
+			return err
+		case <-c.chunks:
+			// Drain one chunk: unblocks the reader goroutine, which reads
+			// from the FIFO, freeing space for go-librespot to write and
+			// release out.lock — allowing the pause call to proceed.
 		}
 	}
 }

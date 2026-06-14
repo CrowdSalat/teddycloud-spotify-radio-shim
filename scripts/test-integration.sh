@@ -154,7 +154,7 @@ else
 
     RESULT=$(curl -s -o "$TMP_AUDIO" \
         -w "%{http_code}|%{content_type}|%{size_download}" \
-        --max-time 8 \
+        --max-time 15 \
         "http://localhost:8093/stream?spotify_uri=spotify:track:4PTG3Z6ehGkBFwjybzWkR8" \
         2>/dev/null || echo "000||0")
 

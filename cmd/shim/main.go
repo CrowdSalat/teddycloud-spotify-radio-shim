@@ -37,21 +37,16 @@ func main() {
 
 	librespotProcess := librespot.NewProcess(configDir, logLevel, logger)
 
-	// Prepare creates the FIFO and writes config. Must happen before opening
-	// the FIFO read end and before Run() starts go-librespot.
 	if err := librespotProcess.Prepare(); err != nil {
 		logger.Error("librespot process prepare failed", "error", err)
 		os.Exit(1)
 	}
 
-	// The FIFO channel carries audio chunks from go-librespot to the HTTP
-	// handler. The channel is created here so the HTTP server can start
-	// before the FIFO is open.
-	audioCh := make(chan []byte, radio.ChannelCapacity)
+	librespotClient := librespot.NewClient("http://localhost:3678")
+	coordinator := radio.NewPlaybackCoordinator(librespotClient, logger)
 
 	// Open the FIFO read end in a goroutine — os.Open blocks until
 	// go-librespot opens the write end inside librespotProcess.Run() below.
-	// Running concurrently avoids a deadlock.
 	go func() {
 		fifo, err := os.Open(librespot.FIFOPath)
 		if err != nil {
@@ -60,17 +55,10 @@ func main() {
 		}
 		defer fifo.Close()
 		reader := radio.NewReader(fifo, logger)
-		if err := reader.RunInto(ctx, audioCh); err != nil && ctx.Err() == nil {
+		if err := reader.Run(ctx, coordinator.Chunks()); err != nil && ctx.Err() == nil {
 			logger.Error("audio reader stopped", "error", err)
 		}
 	}()
-
-	librespotClient := librespot.NewClient("http://localhost:3678")
-
-	eventStream := librespot.NewEventStream("http://localhost:3678", logger)
-	go eventStream.Run(ctx)
-
-	coordinator := radio.NewPlaybackCoordinator(librespotClient, eventStream, audioCh, logger)
 
 	mux := http.NewServeMux()
 	mux.Handle("/stream", coordinator)

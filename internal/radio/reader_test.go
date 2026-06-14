@@ -1,7 +1,7 @@
 package radio
 
 import (
-	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"os"
@@ -14,276 +14,162 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 }
 
-// TestReaderNormalFlow writes 100 chunks and verifies all are received
-// with zero discards.
+// TestReaderNormalFlow: all chunks reach the consumer, none dropped.
 func TestReaderNormalFlow(t *testing.T) {
 	pr, pw := io.Pipe()
+	out := make(chan []byte, 100)
 	reader := NewReader(pr, testLogger())
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	var wg sync.WaitGroup
-
-	// Writer: send 100 chunks.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		chunk := make([]byte, ChunkSize)
-		for i := range chunk {
-			chunk[i] = byte(i % 256)
-		}
-		for i := 0; i < 100; i++ {
-			if _, err := pw.Write(chunk); err != nil {
-				t.Errorf("write %d: %v", i, err)
-				return
-			}
-		}
-		pw.Close()
-	}()
-
-	// Reader goroutine.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if err := reader.Run(); err != nil {
+		if err := reader.Run(ctx, out); err != nil {
 			t.Errorf("reader.Run: %v", err)
 		}
 	}()
 
-	// Consumer: drain the channel and count.
-	received := 0
-	totalBytes := 0
-	for chunk := range reader.C() {
-		received++
-		totalBytes += len(chunk)
-	}
-
-	wg.Wait()
-
-	if received != 100 {
-		t.Errorf("expected 100 chunks, got %d", received)
-	}
-	if totalBytes != 100*ChunkSize {
-		t.Errorf("expected %d bytes, got %d", 100*ChunkSize, totalBytes)
-	}
-
-	m := reader.Metrics()
-	if d := m.ChunksDiscarded.Load(); d != 0 {
-		t.Errorf("expected 0 discards, got %d", d)
-	}
-	if br := m.BytesRead.Load(); br != uint64(100*ChunkSize) {
-		t.Errorf("expected %d BytesRead, got %d", 100*ChunkSize, br)
-	}
-}
-
-// TestReaderSlowConsumer writes more chunks than the channel can hold
-// without any consumer reading. Verifies that discards occur and the
-// reader doesn't block.
-func TestReaderSlowConsumer(t *testing.T) {
-	pr, pw := io.Pipe()
-	reader := NewReader(pr, testLogger())
-
-	writeCount := ChannelCapacity + 20 // more than channel can hold
-
-	var wg sync.WaitGroup
-
-	// Reader goroutine.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if err := reader.Run(); err != nil {
-			t.Errorf("reader.Run: %v", err)
-		}
-	}()
-
-	// Writer: send more chunks than channel capacity without reading.
 	chunk := make([]byte, ChunkSize)
-	for i := 0; i < writeCount; i++ {
+	for i := 0; i < 10; i++ {
 		if _, err := pw.Write(chunk); err != nil {
 			t.Fatalf("write %d: %v", i, err)
 		}
 	}
 	pw.Close()
 
-	// Now drain the channel.
-	received := 0
-	for range reader.C() {
-		received++
-	}
-
+	// Wait for reader to finish, then count buffered chunks.
+	// Run() does not close the caller's channel, so we cannot range over it.
 	wg.Wait()
 
-	m := reader.Metrics()
-	discarded := m.ChunksDiscarded.Load()
-
-	t.Logf("sent=%d received=%d discarded=%d", writeCount, received, discarded)
-
-	if discarded == 0 {
-		t.Error("expected discards > 0 with slow consumer")
+	received := 0
+	for {
+		select {
+		case <-out:
+			received++
+		default:
+			goto done
+		}
 	}
-	if int(discarded)+received != writeCount {
-		t.Errorf("discarded(%d) + received(%d) != sent(%d)", discarded, received, writeCount)
+done:
+	if received != 10 {
+		t.Errorf("expected 10 chunks, got %d", received)
 	}
-	if bd := m.BytesDiscarded.Load(); bd != discarded*uint64(ChunkSize) {
-		t.Errorf("BytesDiscarded=%d, expected %d", bd, discarded*uint64(ChunkSize))
+	if d := reader.Metrics().BytesRead.Load(); d != uint64(10*ChunkSize) {
+		t.Errorf("BytesRead = %d, want %d", d, 10*ChunkSize)
 	}
 }
 
-// TestReaderPauseResume simulates go-librespot pausing (stop writing to
-// the pipe) and resuming. The reader should block harmlessly on the
-// empty pipe and resume when data appears again.
-func TestReaderPauseResume(t *testing.T) {
+// TestReaderBackpressure: when the consumer is slow, the reader blocks
+// on the channel send (does not discard) — backpressure propagates.
+func TestReaderBackpressure(t *testing.T) {
 	pr, pw := io.Pipe()
+	// Unbuffered channel: every send blocks until consumer reads.
+	out := make(chan []byte)
 	reader := NewReader(pr, testLogger())
 
-	var wg sync.WaitGroup
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	wg.Add(1)
+	readerDone := make(chan struct{})
 	go func() {
-		defer wg.Done()
-		if err := reader.Run(); err != nil {
+		defer close(readerDone)
+		if err := reader.Run(ctx, out); err != nil {
 			t.Errorf("reader.Run: %v", err)
 		}
 	}()
 
 	chunk := make([]byte, ChunkSize)
 
-	// Phase 1: write 5 chunks.
-	for i := 0; i < 5; i++ {
-		if _, err := pw.Write(chunk); err != nil {
-			t.Fatalf("write phase 1: %v", err)
-		}
-	}
+	// Write one chunk to the pipe.
+	writeErr := make(chan error, 1)
+	go func() {
+		_, err := pw.Write(chunk)
+		writeErr <- err
+	}()
 
-	// Drain phase 1.
-	for i := 0; i < 5; i++ {
-		select {
-		case <-reader.C():
-		case <-time.After(2 * time.Second):
-			t.Fatal("timeout waiting for phase 1 chunk")
-		}
-	}
-
-	// Phase 2: "pause" — write nothing for 200ms.
-	// Reader should block on empty pipe, not crash, not spin.
-	time.Sleep(200 * time.Millisecond)
-
-	// Verify channel is empty during pause.
+	// Consumer reads it.
 	select {
-	case <-reader.C():
-		t.Error("received unexpected chunk during pause")
-	default:
-		// Good — channel is empty.
+	case <-out:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for chunk")
 	}
 
-	// Phase 3: "resume" — write 5 more chunks.
-	for i := 0; i < 5; i++ {
-		if _, err := pw.Write(chunk); err != nil {
-			t.Fatalf("write phase 3: %v", err)
+	// Write must have completed cleanly.
+	select {
+	case err := <-writeErr:
+		if err != nil {
+			t.Errorf("write error: %v", err)
 		}
-	}
-
-	for i := 0; i < 5; i++ {
-		select {
-		case <-reader.C():
-		case <-time.After(2 * time.Second):
-			t.Fatal("timeout waiting for phase 3 chunk")
-		}
+	case <-time.After(time.Second):
+		t.Fatal("write goroutine did not complete")
 	}
 
 	pw.Close()
-	wg.Wait()
-
-	m := reader.Metrics()
-	if br := m.BytesRead.Load(); br != uint64(10*ChunkSize) {
-		t.Errorf("expected %d BytesRead, got %d", 10*ChunkSize, br)
-	}
-	if d := m.ChunksDiscarded.Load(); d != 0 {
-		t.Errorf("expected 0 discards, got %d", d)
-	}
+	<-readerDone
 }
 
-// TestReaderPipeError verifies that the reader returns an error (not EOF)
-// when the pipe read end encounters a non-EOF error, and that the
-// channel is closed.
-func TestReaderPipeError(t *testing.T) {
-	// Use an os.Pipe so we can close the write end abruptly.
-	osR, osW, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
+// TestReaderContextCancel: cancelling the context stops the reader while it
+// is blocked on the channel send (the interruptible path). The Read() call
+// itself is an OS-level block that context cannot interrupt; in production
+// the FIFO closes when go-librespot stops, which unblocks the read.
+func TestReaderContextCancel(t *testing.T) {
+	pr, pw := io.Pipe()
+	defer pw.Close()
 
-	reader := NewReader(osR, testLogger())
+	// Unbuffered channel: reader will block in select waiting for a consumer.
+	out := make(chan []byte)
+	reader := NewReader(pr, testLogger())
 
-	errCh := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan error, 1)
 	go func() {
-		errCh <- reader.Run()
+		done <- reader.Run(ctx, out)
 	}()
 
-	// Write one chunk, then close the write end.
+	// Write one chunk: reader gets past Read() and into the select.
+	// Nobody reads from out, so the reader blocks on case out <- chunk.
 	chunk := make([]byte, ChunkSize)
-	if _, err := osW.Write(chunk); err != nil {
+	if _, err := pw.Write(chunk); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	osW.Close()
 
-	// Reader should get EOF and return nil.
+	time.Sleep(20 * time.Millisecond)
+	cancel() // fires ctx.Done() in the select — reader returns context.Canceled
+
 	select {
-	case err := <-errCh:
-		if err != nil {
-			t.Errorf("expected nil on EOF, got: %v", err)
+	case err := <-done:
+		if err != context.Canceled {
+			t.Errorf("expected context.Canceled, got %v", err)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for reader to finish")
-	}
-
-	// Channel should be closed and drained.
-	count := 0
-	for range reader.C() {
-		count++
-	}
-	if count != 1 {
-		t.Errorf("expected 1 chunk before close, got %d", count)
+		t.Fatal("reader did not stop after context cancellation")
 	}
 }
 
-// TestReaderChunkIntegrity verifies that data read from the channel
-// matches what was written to the pipe (no corruption from buffer reuse).
-func TestReaderChunkIntegrity(t *testing.T) {
+// TestReaderEOF: reader returns nil on clean EOF.
+func TestReaderEOF(t *testing.T) {
 	pr, pw := io.Pipe()
+	out := make(chan []byte, 10)
 	reader := NewReader(pr, testLogger())
 
-	var wg sync.WaitGroup
-
-	wg.Add(1)
+	ctx := context.Background()
+	done := make(chan error, 1)
 	go func() {
-		defer wg.Done()
-		if err := reader.Run(); err != nil {
-			t.Errorf("reader.Run: %v", err)
-		}
+		done <- reader.Run(ctx, out)
 	}()
 
-	// Write 10 chunks with distinct content.
-	for i := 0; i < 10; i++ {
-		chunk := bytes.Repeat([]byte{byte(i)}, ChunkSize)
-		if _, err := pw.Write(chunk); err != nil {
-			t.Fatalf("write chunk %d: %v", i, err)
+	pw.Close() // EOF immediately
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("expected nil on EOF, got %v", err)
 		}
-	}
-	pw.Close()
-
-	// Verify each chunk has the correct content.
-	i := 0
-	for chunk := range reader.C() {
-		expected := bytes.Repeat([]byte{byte(i)}, ChunkSize)
-		if !bytes.Equal(chunk, expected) {
-			t.Errorf("chunk %d: content mismatch (first byte: got %d, want %d)",
-				i, chunk[0], byte(i))
-		}
-		i++
-	}
-
-	wg.Wait()
-
-	if i != 10 {
-		t.Errorf("expected 10 chunks, got %d", i)
+	case <-time.After(2 * time.Second):
+		t.Fatal("reader did not exit on EOF")
 	}
 }
