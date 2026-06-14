@@ -1,5 +1,3 @@
-// Package radio provides the FIFO reader that bridges go-librespot's pipe
-// output to the shim's HTTP streaming layer.
 package radio
 
 import (

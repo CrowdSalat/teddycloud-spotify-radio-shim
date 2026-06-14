@@ -70,10 +70,10 @@ func main() {
 	eventStream := librespot.NewEventStream("http://localhost:3678", logger)
 	go eventStream.Run(ctx)
 
-	streamHandler := radio.NewPlaybackCoordinator(librespotClient, eventStream, audioCh, logger)
+	coordinator := radio.NewPlaybackCoordinator(librespotClient, eventStream, audioCh, logger)
 
 	mux := http.NewServeMux()
-	mux.Handle("/stream", streamHandler)
+	mux.Handle("/stream", coordinator)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})

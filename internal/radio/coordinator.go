@@ -1,4 +1,3 @@
-// Package server provides the shim's HTTP handlers.
 package radio
 
 import (
