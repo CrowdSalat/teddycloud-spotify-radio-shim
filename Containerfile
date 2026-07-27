@@ -1,5 +1,5 @@
 # ---- Stage 1: Build go-librespot ----
-FROM docker.io/library/golang:1.25-bookworm AS librespot-build
+FROM docker.io/library/golang:1.26-bookworm AS librespot-build
 
 ARG LIBRESPOT_VERSION=v0.7.3
 
@@ -14,7 +14,7 @@ WORKDIR /src/go-librespot
 RUN go build -o /usr/local/bin/go-librespot ./cmd/daemon
 
 # ---- Stage 2: Build shim ----
-FROM docker.io/library/golang:1.25-bookworm AS shim-build
+FROM docker.io/library/golang:1.26-bookworm AS shim-build
 
 WORKDIR /src/shim
 COPY go.mod go.sum* ./
