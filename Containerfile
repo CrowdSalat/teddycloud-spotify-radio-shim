@@ -1,7 +1,7 @@
 # ---- Stage 1: Build go-librespot ----
 FROM docker.io/library/golang:1.26-bookworm AS librespot-build
 
-ARG LIBRESPOT_VERSION=v0.7.3
+ARG LIBRESPOT_VERSION=v0.7.4
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libogg-dev libvorbis-dev libflac-dev libasound2-dev git \
