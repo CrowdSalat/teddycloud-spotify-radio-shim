@@ -61,9 +61,6 @@ func (c *PlaybackCoordinator) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	c.mu.Lock()
 	sameURI := c.lastURI == uri
 	wasPlaying := c.lastURI != ""
-	if !sameURI {
-		c.lastURI = uri
-	}
 	c.mu.Unlock()
 
 	if !sameURI {
@@ -77,8 +74,16 @@ func (c *PlaybackCoordinator) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		if err := c.client.Play(ctx, uri); err != nil {
 			c.logger.Error("play failed", "uri", uri, "error", err)
 			http.Error(w, "play failed: "+err.Error(), http.StatusBadGateway)
+			// lastURI is intentionally not updated: a failed play leaves
+			// go-librespot in its previous state, so the next request for
+			// the same URI would re-attempt play rather than assume it
+			// succeeded.
 			return
 		}
+		// Update lastURI only after go-librespot confirms the play succeeded.
+		c.mu.Lock()
+		c.lastURI = uri
+		c.mu.Unlock()
 	}
 	// Same URI: backpressure releases the moment we start reading — go-librespot
 	// resumes from exactly where it was blocked. No API call needed.

@@ -10,19 +10,30 @@ import (
 	"time"
 )
 
-const defaultTimeout = 5 * time.Second
+const (
+	defaultTimeout = 5 * time.Second
+
+	// pauseTimeout is intentionally longer than defaultTimeout. The pause
+	// command must wait for go-librespot's pipe driver to release out.lock,
+	// which only happens once the FIFO consumer (pauseWithDrain) has drained
+	// enough data to unblock the blocked file.Write. Under load this can take
+	// several seconds, so 30 s gives the drain loop adequate headroom.
+	pauseTimeout = 30 * time.Second
+)
 
 // Client calls the go-librespot REST API.
 type Client struct {
-	baseURL    string
-	httpClient *http.Client
+	baseURL     string
+	httpClient  *http.Client
+	pauseClient *http.Client
 }
 
 // NewClient creates a Client targeting baseURL (e.g. "http://localhost:3678").
 func NewClient(baseURL string) *Client {
 	return &Client{
-		baseURL:    baseURL,
-		httpClient: &http.Client{Timeout: defaultTimeout},
+		baseURL:     baseURL,
+		httpClient:  &http.Client{Timeout: defaultTimeout},
+		pauseClient: &http.Client{Timeout: pauseTimeout},
 	}
 }
 
@@ -42,9 +53,26 @@ func (c *Client) Play(ctx context.Context, uri string) error {
 	return c.post(ctx, "/player/play", body)
 }
 
-// Pause pauses playback.
+// Pause pauses playback. Uses a dedicated HTTP client with a longer timeout
+// (pauseTimeout) because the request must wait for go-librespot's pipe driver
+// to release its internal mutex — see docs/research/go-librespot-pipe-deadlock.md.
 func (c *Client) Pause(ctx context.Context) error {
-	return c.post(ctx, "/player/pause", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/player/pause", nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := c.pauseClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("status %d from /player/pause", resp.StatusCode)
+	}
+
+	return nil
 }
 
 // Resume resumes paused playback.
