@@ -1,8 +1,8 @@
 # teddycloud-spotify-radio-shim
 
-A bridge between [Teddycloud](https://github.com/toniebox-reverse-engineering/teddycloud) and Spotify. It translates physical Toniebox interactions (figurine placed/lifted, ear slaps) into Spotify playback commands and streams the audio back to Teddycloud.
+> **Paused:** due to changes in spotifies encryption algorithm see [issue 279 in go-librespot](https://github.com/devgianlu/go-librespot/issues/279)
 
-> **Status:** Pre-implementation — documentation and project skeleton only. No working features yet.
+A bridge between [Teddycloud](https://github.com/toniebox-reverse-engineering/teddycloud) and Spotify. It translates physical Toniebox interactions (figurine placed/lifted, ear slaps) into Spotify playback commands and streams the audio back to Teddycloud.
 
 ## How It Works
 
@@ -42,7 +42,3 @@ make container                # build multi-arch container image
 ```
 
 Requires Go 1.21+ for local builds. The container image builds go-librespot v0.7.3 from source (requires Go 1.25, handled inside the build stage).
-
-## License
-
-TBD
