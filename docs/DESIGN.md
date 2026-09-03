@@ -1,76 +1,8 @@
 # Design: teddycloud-spotify-radio-shim
 
 Read [REQUIREMENTS.md](REQUIREMENTS.md) first.  
-For Spotify Soloist specifics, see [research/spotify-soloist.md](research/spotify-soloist.md).
-
----
-
-## Blockers — must be resolved before implementation
-
-Two things cannot be decided from documentation alone. They require a running Soloist binary.
-
-### Blocker 1: Does `--single-track` accept album URIs? ✅ RESOLVED
-
-**Result (2026-09-03):** `--single-track` accepts **track URIs only**. Album and playlist URIs are rejected.
-
-| URI type | Result | Exit code |
-|---|---|---|
-| `spotify:track:<id>` | Plays and exits | `0` |
-| `spotify:album:<id>` | Rejected: "`--single-track requires a valid single playable Spotify URI`" | `1` |
-| `spotify:playlist:<id>` | Rejected: "`--single-track requires a valid single playable Spotify URI`" | `1` |
-
-**Consequence:** Albums and playlists cannot be played in single-track mode. The design must use **Spotify Connect mode + WebSocket `play` command** (the fallback described below). Single-track mode remains viable only if the shim can resolve album/playlist URIs down to individual tracks before calling Soloist — but the requirements imply figurines map to albums/playlists, so Connect mode is the primary target.
-
-### Blocker 2: Can audio be captured from a headless PulseAudio null sink? ✅ RESOLVED
-
-Soloist outputs audio to PipeWire or PulseAudio only. There is no pipe or file output. The proposed approach is:
-
-1. Run PulseAudio inside the container with a null sink as the default output device.
-2. Soloist plays to the null sink.
-3. The shim records from the null sink's `.monitor` source.
-
-**Result (2026-09-03):** Yes. Confirmed end-to-end with a real Spotify session (Soloist 1.3.8.4, build 20260903) in a headless container (no sound card):
-
-```
-Soloist —libpulse→ PulseAudio null sink → virtual_out.monitor → parec / Go lib → WAV HTTP stream
-```
-
-- Soloist accepted a **PulseAudio-only** environment (no PipeWire daemon — it falls back cleanly).
-- Audio arrived at realistic timing: `parec` captured real-time rate-limited PCM.
-- Recorded audio validated as `pcm_s16le 44100Hz stereo`; volume showed actual music (`mean_volume ≈ -38 dB`), not silence (`-91 dB`), confirming real audio passed through the monitor while playing.
-
-**Test tooling added to this repo:**
-
-| File | Purpose |
-|---|---|
-| `Containerfile.blocker2` | Test image: PulseAudio + Soloist + python3 + parec + ffmpeg |
-| `container/blocker2-test.sh` | Automated capture + validation (pass/fail) |
-| `container/stream-test.sh` | Live listen: streams `virtual_out.monitor` as WAV over HTTP on `:8000` (for `ffplay`, and to eyeball the pipeline) |
-| `Makefile` targets | `blocker2-build`, `blocker2-test`, `stream-test` |
-
-**Noteworthy findings / gotchas discovered while testing:**
-
-- **`--userns=keep-id --user <uid>:<gid>` sets `HOME=/` and leaves `XDG_RUNTIME_DIR` empty.** PulseAudio needs both. Pin them to owned scratch dirs in the entrypoint (e.g. `XDG_RUNTIME_DIR=/tmp/runtime-shim`, `HOME=/tmp/home-shim`), else PulseAudio fails with `Failed to create secure directory (//.config/pulse)`.
-- **With `-n` (no default config) you MUST also load `module-native-protocol-unix`.** Loading only `module-null-sink` starts PulseAudio but creates no client socket, so `pactl`/`parec`/Soloist get "Connection refused" and `pactl list` shows only a stale `pid` file under the runtime dir. Load both:
-  ```
-  pulseaudio --exit-idle-time=-1 -n \
-    --load="module-native-protocol-unix" \
-    --load="module-null-sink sink_name=virtual_out sink_properties=device.description=Shim_Sink" \
-    --daemonize=yes --log-target=stderr
-  ```
-- **Streaming WAV header must use `0xFFFFFFFF` raw for the RIFF size.** `0xFFFFFFFF + 36` overflows the 32-bit field and crashes the writer (`OverflowError: int too big to convert`), producing `http_code=200` with **0 bytes**. ffmpeg/ffplay accepts `0xFFFFFFFF` on both size fields as "unknown length".
-- **`parec --file-format=wav` cannot write to a pipe/FIFO** (it needs to seek to patch the header). Stream raw PCM (`parec --format=s16le --rate=44100 --channels=2`) and have the server write the 44-byte WAV header itself.
-- **Silence vs noise check:** a working monitor link with no playback yields clean `-91 dB` (digital silence). Don't mistake flowing bytes for audio; verify with `ffmpeg -af volumedetect` that volume is much higher during playback.
-- **Control via WebSocket works** (needed for the test): a stdlib-only Python script can send `{"type":"command","command":"play"}`; a `playback_state` → `buffering` → `playing` transition with `command_result` and `device_changed is_active:true` confirms accepted and playing.
-
-Unknowns remaining after the test:
-- `github.com/jfreymuth/pulse` (pure Go) versus the `parec`/`ffmpeg -f pulse` subprocess — confirmed `parec` works; the Go library path is validated during shim implementation.
-
----
-
-## Language and runtime
-
-**Go.** The shim is written in Go. The existing codebase is Go. Soloist is a subprocess; the shim controls it via its WebSocket API.
+Blocker results and Soloist specifics: [research/spotify-soloist.md](research/spotify-soloist.md).  
+Incremental build order: [STRUCTURE.md](STRUCTURE.md).
 
 ---
 
@@ -78,221 +10,156 @@ Unknowns remaining after the test:
 
 ```
 AUDIO (data plane):
-  Toniebox ──HTTPS──▶ Teddycloud ──HTTP GET /stream?uri=──▶ Shim ◀── PulseAudio monitor ◀── Soloist ◀── Spotify CDN
+  Toniebox ──HTTPS──▶ Teddycloud ──HTTP GET /stream?spotify_uri=──▶ Shim ◀── PulseAudio monitor ◀── Soloist ◀── Spotify CDN
 
 CONTROL (event plane):
   Toniebox ──RTNL──▶ Teddycloud ──SSE──▶ Shim ──WebSocket──▶ Soloist
 ```
 
-Teddycloud re-encodes the audio stream it receives. The shim does not need to produce a specific codec. It must produce a continuous HTTP stream that ffmpeg (inside Teddycloud) can decode. Raw PCM with a WAV header is sufficient.
+Teddycloud re-encodes whatever the shim sends. The shim does not need to produce a specific codec — raw PCM with a streaming WAV header is sufficient.
 
 ---
 
-## Container topology
+## Language and runtime
 
-**Open question:** whether all processes (PulseAudio, Soloist, shim) run in one container or across separate containers (e.g. one per process with a shared PulseAudio socket volume). The single-container approach is simpler for now and matches the existing pattern. Revisit if operational complexity warrants splitting.
-
-The current working assumption is a **single container**, shown below.
-
-## Components
-
-```
-┌────────────────────────── Container (single instance) ──────────────────────────┐
-│                                                                                  │
-│  tini (PID 1)                                                                    │
-│    └── entrypoint script                                                         │
-│          ├── starts pulseaudio (null sink, default output)                       │
-│          └── starts shim                                                         │
-│                                                                                  │
-│  shim process                                                                    │
-│    ├── Soloist supervisor  ── spawns/monitors soloist subprocess                 │
-│    │     └── WebSocket client ── ws://127.0.0.1:<ws.port>                        │
-│    ├── PulseAudio recorder ── records from virtual_out.monitor                   │
-│    │     └── chunk channel ── buffers PCM chunks in memory                       │
-│    ├── HTTP server                                                                │
-│    │     ├── GET /stream?spotify_uri=...  ── audio delivery                      │
-│    │     └── GET /healthz                                                         │
-│    └── SSE listener ── Teddycloud /api/sse                                       │
-│                                                                                  │
-│  soloist subprocess                                                               │
-│    ├── Spotify Connect session                                                   │
-│    ├── WebSocket API on 127.0.0.1:<dynamic port>                                 │
-│    └── audio output ──▶ PulseAudio (virtual_out null sink)                       │
-│                                                                                  │
-│  pulseaudio daemon                                                                │
-│    └── null sink: virtual_out  (monitor source: virtual_out.monitor)             │
-│                                                                                  │
-│  PVC: /data  ── Soloist data directory (session, ws.port, ws.addr)               │
-└──────────────────────────────────────────────────────────────────────────────────┘
-```
+**Go.** Single binary. The shim is the process orchestrator — it starts and supervises PulseAudio and Soloist as subprocesses. There is no shell entrypoint script.
 
 ---
 
-## Soloist subprocess
+## URI delivery (Scenario A)
 
-### Runtime mode
-
-**Spotify Connect mode** is the primary target (per Blocker 1 result). One long-running Soloist process stays active; each URI request is sent via the WebSocket `play` command. This is required because albums and playlists — which figurines map to — are rejected by `--single-track`.
-
-Single-track mode (`--single-track <track-URI>`, spawn-per-request) is retained only as a potential optimization or fallback where a figurine is known to map to exactly one track. The design below follows the Connect-process model.
-
-### Startup command
+Teddycloud is configured per-figurine with a stream URL:
 
 ```
-soloist \
-  --device-name "teddycloud-spotify-shim" \
-  --api-key "$SOLOIST_API_KEY" \
-  --data-dir /data \
-  --cache-dir /cache \
-  --ws 127.0.0.1:0
+http://<shim>:8080/stream?spotify_uri=<URI>
 ```
 
-No `--single-track` flag. Soloist runs as a long-lived Spotify Connect device. The shim sends URI changes via the WebSocket `play` command.
+The URI lives in Teddycloud's figurine config. The shim has no mapping table of its own. SSE events carry no URI — they are pure transport controls (play/pause/skip).
 
-`--ws 127.0.0.1:0` — OS picks the port. The shim reads the actual port from `/data/ws.port` after Soloist starts.
+---
 
-### WebSocket port discovery
+## Subprocess orchestration
 
-Soloist writes `ws.addr` and `ws.port` into the data directory once the WebSocket server is up. The shim polls for the file's existence with a short timeout before connecting.
+The shim owns three subprocesses:
 
-### Pairing (one-time setup)
+| Subprocess | Purpose |
+|---|---|
+| PulseAudio | Virtual audio sink. Runs headless, no sound card needed. |
+| Soloist | Spotify Connect device. Plays to PulseAudio. Controlled via WebSocket. |
+| Recorder | Reads PCM from `virtual_out.monitor`. Implemented as a goroutine, not a subprocess. |
 
-Before Connect mode works, a session must be stored. The operator runs:
+All subprocess spawning is behind a `ProcessManager` interface so the state machine is unit-testable without binaries on `$PATH`.
+
+### PulseAudio
+
+Started by the shim before Soloist. Required args (verified — see research):
 
 ```
-soloist --device-name "teddycloud-spotify-shim" --api-key "$SOLOIST_API_KEY" --data-dir /data --pair
+pulseaudio --exit-idle-time=-1 -n
+  --load=module-native-protocol-unix
+  --load=module-null-sink sink_name=virtual_out sink_properties=device.description=Shim_Sink
+  --daemonize=yes --log-target=stderr
 ```
 
-Then opens the Spotify app and selects the device. The session is stored in `/data` (PVC). Subsequent starts restore it automatically.
+The shim sets `HOME` and `XDG_RUNTIME_DIR` to writable scratch dirs before spawning, then polls for the Unix socket before proceeding.
 
-### Build expiry
+### Soloist
 
-Soloist binaries expire after 90 days. Exit code `10` signals expiry. The shim supervisor must detect this exit code and emit a clear log message. The binary cannot be redistributed, so it must be downloaded by the user or at image build time into a private registry.
+Not baked into the container image (redistribution concern). The shim checks `$PATH` and `$SOLOIST_DATA_DIR/bin/soloist` at startup. If not found, downloads from the Spotify CDN for the detected architecture.
 
-### Supervisor behaviour
+Startup command:
 
-The supervisor wraps the Soloist subprocess and handles:
-- Startup: wait for `ws.port` file to appear before declaring ready
-- Normal exit `0`: unexpected for a long-running Connect device; log and restart with backoff
-- Exit code `10`: log expiry error, do not restart, surface via `/healthz`
-- Exit code `1`: log error, optionally retry with backoff
-- Crash (signal): restart with exponential backoff
+```
+soloist --device-name $SOLOIST_DEVICE_NAME --api-key $SOLOIST_API_KEY
+        --data-dir $SOLOIST_DATA_DIR --cache-dir $SOLOIST_CACHE_DIR
+        --ws 127.0.0.1:0
+```
+
+`--ws 127.0.0.1:0` — OS picks the port. The shim reads the actual port from `$SOLOIST_DATA_DIR/ws.port` once Soloist writes it, then opens the WebSocket and sends `activate`.
+
+#### Supervisor exit-code handling
+
+| Exit code | Meaning | Action |
+|---|---|---|
+| `0` | Unexpected clean exit | Log warning, restart with backoff |
+| `1` | General failure | Log error, restart with backoff |
+| `10` | Build expired | Log error, **do not restart**, surface via `/healthz` |
+| Signal | Crash | Restart with exponential backoff |
+
+Binaries expire after 90 days. On exit code `10`, the shim re-downloads Soloist on next startup.
+
+#### Pairing (one-time setup)
+
+Before Connect mode works, the operator runs Soloist manually with `--pair`, selects the device in the Spotify app, and the session is stored in `$SOLOIST_DATA_DIR`. Subsequent starts restore it automatically.
 
 ---
 
 ## Audio path
 
 ```
-Soloist ──libpulse──▶ PulseAudio null sink
+Soloist ──libpulse──▶ virtual_out (null sink)
                               │
-                      virtual_out.monitor
+                    virtual_out.monitor
                               │
-                   github.com/jfreymuth/pulse
-                    RecordMonitor(virtual_out)
+                  github.com/jfreymuth/pulse
+                        (goroutine)
                               │
-                        chunk channel
-                        (in-process)
+                        chan []byte
                               │
-                        HTTP writer
-                        WAV header + PCM stream
+                       /stream handler
+                   WAV header + PCM chunks
                               │
-                        Teddycloud
-                        (ffmpeg re-encodes to Opus/TAF)
+                         Teddycloud
+                    (ffmpeg → Opus/TAF)
                               │
-                         Toniebox
+                          Toniebox
 ```
 
-### PulseAudio setup
+The recorder runs continuously and independently of HTTP clients. Chunks are discarded when the channel is full (backpressure safety valve) to prevent the PulseAudio client buffer from stalling.
 
-PulseAudio runs inside the container with no physical sound card. Configuration:
+**Fallback:** if `github.com/jfreymuth/pulse` is insufficient, replace the recorder goroutine with `ffmpeg -f pulse -i virtual_out.monitor -f s16le -ar 44100 -ac 2 pipe:1` via `StdoutPipe()`. The `chan []byte` interface is unchanged.
 
-```
-pulseaudio --exit-idle-time=-1 -n \
-  --load="module-native-protocol-unix" \
-  --load="module-null-sink sink_name=virtual_out sink_properties=device.description=\"Shim_Sink\""
-```
+### WAV header
 
-`--exit-idle-time=-1` keeps it alive between tracks. With `-n` (no default config), `module-native-protocol-unix` must be loaded explicitly or no client socket is created. Set `XDG_RUNTIME_DIR` and `HOME` to writable scratch dirs (with `--userns=keep-id` these often default to `/` and empty).
-
-### Recorder
-
-The shim records from `virtual_out.monitor` using `github.com/jfreymuth/pulse` (pure Go, no cgo). It reads PCM s16le at 44100 Hz stereo and feeds chunks into a buffered channel. The channel decouples the recorder from the HTTP writer.
-
-If Blocker 2 shows that the Go library is insufficient, the fallback is an `ffmpeg -f pulse -i virtual_out.monitor -f s16le pipe:1` subprocess with `StdoutPipe()`.
-
-### HTTP stream format
-
-The `/stream` endpoint writes a **streaming WAV header** (size fields set to `0xFFFFFFFF`) followed by raw PCM chunks from the channel. `Content-Type: audio/wav`. Teddycloud's ffmpeg accepts this and re-encodes it to Opus/TAF for the Toniebox.
-
-### Backpressure
-
-The recorder reads from PulseAudio at real-time speed regardless of consumer state. If the HTTP writer stalls (TCP back-pressure), the channel fills. The recorder discards chunks when the channel is full to prevent the PulseAudio client buffer from stalling. This is the same safety valve pattern used in the previous go-librespot design.
+Write a streaming WAV header with both RIFF and data size fields set to `0xFFFFFFFF`. Do not compute `0xFFFFFFFF + 36` — that overflows the 32-bit field and delivers 0 bytes.
 
 ---
 
 ## Control path
 
-```
-Toniebox ──▶ Teddycloud SSE ──▶ Shim SSE listener ──▶ Soloist WebSocket
-```
+The shim connects to `$TEDDYCLOUD_URL/api/sse` and translates events to WebSocket commands. Auto-reconnects on drop.
 
-The shim connects to Teddycloud's SSE endpoint (`/api/sse`) and listens for hardware events. Each event maps to a WebSocket command sent to Soloist.
-
-| Teddycloud SSE event | Soloist WebSocket command |
+| SSE event | WebSocket command |
 |---|---|
 | Figurine placed | `{ "type": "command", "command": "play" }` |
 | Figurine lifted | `{ "type": "command", "command": "pause" }` |
 | Right ear slap | `{ "type": "command", "command": "skip_next" }` |
 | Left ear slap | `{ "type": "command", "command": "skip_prev" }` |
 
-The SSE listener must reconnect automatically if Teddycloud restarts or the connection drops.
+---
+
+## Hot-swap
+
+When `/stream` is called with a new URI while a stream is active:
+
+1. Cancel the previous stream's HTTP response context.
+2. Send WebSocket `play` with the new URI.
+3. Recorder keeps running — monitor source is always open.
+4. New HTTP response reads from the channel.
+
+One active stream slot, protected by a mutex.
 
 ---
 
-## Hot-swap (figurine change)
+## Container
 
-When Teddycloud requests `/stream` with a new URI while a stream is already active:
+Single container. Debian trixie base (glibc ≥ 2.38 required; Bookworm ships 2.36). Install `pulseaudio libatomic1 tini ca-certificates`. `tini` is PID 1. The shim binary is the sole entrypoint — no shell script.
 
-1. Shim cancels the previous stream's HTTP response context.
-2. Shim sends the WebSocket `play` command with the new URI to the running Soloist process (Connect mode).
-3. The recorder keeps running — PulseAudio monitor source is always open.
-4. The new HTTP response starts reading from the channel.
-
-There is no FIFO, no pipe lock, no deadlock risk. The audio path is decoupled through PulseAudio and an in-process channel.
-
----
-
-## Testability without Toniebox and Teddycloud
-
-The shim must be testable with only `curl` and a mock SSE server.
-
-### Audio test
-
-```bash
-curl http://localhost:8080/stream?spotify_uri=spotify:album:<id> | ffplay -f wav -
+```
+ENTRYPOINT ["/usr/bin/tini", "--", "/shim"]
 ```
 
-If audio plays in ffplay, the audio path is working.
-
-### Control test
-
-A `cmd/mock-teddycloud` binary (in this repo) serves a minimal SSE endpoint and a small web page with buttons that fire figurine-placed, figurine-lifted, right-ear, and left-ear events. The shim connects to the mock instead of real Teddycloud via the `TEDDYCLOUD_URL` env var.
-
----
-
-## Configuration
-
-All configuration via environment variables.
-
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `SOLOIST_API_KEY` | Yes | — | Spotify Soloist API key. Treat as secret. |
-| `TEDDYCLOUD_URL` | Yes | — | Teddycloud base URL, e.g. `http://teddycloud:80` |
-| `LISTEN_ADDR` | No | `:8080` | Shim HTTP listen address |
-| `SOLOIST_DATA_DIR` | No | `/data` | Soloist data directory. Mount PVC here. |
-| `SOLOIST_CACHE_DIR` | No | `/cache` | Soloist cache directory |
-| `SOLOIST_DEVICE_NAME` | No | `teddycloud-spotify-shim` | Spotify Connect device name |
-| `LOG_LEVEL` | No | `info` | `debug`, `info`, `warn`, `error` |
+Soloist is downloaded at runtime by the shim, not at image build time.
 
 ---
 
@@ -300,16 +167,20 @@ All configuration via environment variables.
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/stream` | `GET` | `?spotify_uri=<URI>` — starts playback, streams WAV audio. One active stream at a time. |
-| `/healthz` | `GET` | Returns 200 if shim is running. Returns 503 with reason if Soloist exited with code 10 (expired). |
+| `/stream` | `GET` | `?spotify_uri=<URI>` — starts playback, streams WAV. One active stream at a time. |
+| `/healthz` | `GET` | `200` if healthy. `503 {"error":"soloist_expired"}` if Soloist exited with code 10. |
 
 ---
 
-## Open questions (post-blocker)
+## Configuration
 
-These depend on the blocker test results but do not block further design work.
-
-1. **Single-track vs Connect mode** — resolved by Blocker 1: **Connect mode**, since `--single-track` rejects album/playlist URIs.
-2. **PulseAudio vs PipeWire** — Soloist prefers PipeWire. If the null-sink approach works with PulseAudio alone (via `pipewire-pulse` compatibility layer or native PulseAudio), no PipeWire daemon is needed. If Soloist requires native PipeWire, the container needs PipeWire + WirePlumber + pipewire-pulse.
-3. **Startup ordering** — PulseAudio must be ready before Soloist starts (Soloist connects to PulseAudio at launch). The entrypoint script must wait for the PulseAudio socket before starting Soloist.
-4. **Seek on resume** — when a figurine is lifted and placed again, should playback resume from where it paused (default Spotify behaviour) or restart from the beginning? Default Spotify behaviour (resume from position) is assumed.
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `SOLOIST_API_KEY` | Yes | — | Spotify Soloist API key. Treat as secret. |
+| `TEDDYCLOUD_URL` | Yes | — | Teddycloud base URL, e.g. `http://teddycloud:80` |
+| `LISTEN_ADDR` | No | `:8080` | Shim HTTP listen address |
+| `SOLOIST_DATA_DIR` | No | `/data` | Soloist data + session directory. Mount PVC here. |
+| `SOLOIST_CACHE_DIR` | No | `/cache` | Soloist cache directory |
+| `SOLOIST_DEVICE_NAME` | No | `teddycloud-spotify-shim` | Spotify Connect device name |
+| `SOLOIST_BIN` | No | auto | Explicit path to soloist binary. Skips auto-download if set. |
+| `LOG_LEVEL` | No | `info` | `debug`, `info`, `warn`, `error` |
