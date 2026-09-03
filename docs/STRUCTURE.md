@@ -64,82 +64,73 @@ curl -s http://localhost:8080/healthz   # → 200 OK
 
 ---
 
-## Phase 2 — PulseAudio orchestration
+## Phase 2a — Soloist binary management
 
-**Goal:** the shim starts PulseAudio as a subprocess and verifies it is ready.
+**Goal:** the shim finds or downloads the Soloist binary and verifies it executes.
 
 ### Tasks
 
-- `internal/audio`: implement `AudioDaemon` with a `PulseAudio` concrete type wrapping a `ProcessManager`.
-  - Before spawning: set `HOME` and `XDG_RUNTIME_DIR` to writable scratch dirs (`/tmp/home`, `/tmp/runtime`) via `os.Setenv`. This avoids "Failed to create secure directory" when running with `--userns=keep-id`.
-  - Start PulseAudio:
-    ```
-    pulseaudio --exit-idle-time=-1 -n
-      --load=module-native-protocol-unix
-      --load=module-null-sink sink_name=virtual_out sink_properties=device.description=Shim_Sink
-      --daemonize=yes --log-target=stderr
-    ```
-    Note: `module-native-protocol-unix` must be loaded explicitly with `-n`; without it no client socket is created and all clients fail with "Connection refused".
-  - Poll for the PulseAudio Unix socket at `$XDG_RUNTIME_DIR/pulse/native` until it appears (timeout: 10 s).
-  - Expose a `Ready() bool` method.
-- `/healthz` reflects PulseAudio state: `503` with reason if PulseAudio failed to start.
-- Unit test: fake `ProcessManager` returns exit 0 immediately; assert `Ready()` is false and error is returned.
+- `internal/soloist`: `BinaryManager` struct.
+  - Resolution order: `SOLOIST_BIN` env var → `soloist` on `$PATH` → `$SOLOIST_DATA_DIR/bin/soloist`.
+  - If not found: download from Spotify CDN using `net/http` for the detected architecture (`runtime.GOARCH` → `x86_64` / `arm64` / `arm32`). Place at `$SOLOIST_DATA_DIR/bin/soloist`, `chmod +x`.
+  - Check binary age: if modification time older than 80 days, log a warning. On exit code `10` (expiry): delete binary so next startup re-downloads.
+  - Smoke-test: run `soloist --version` (or equivalent) to confirm the binary executes. Fail fast if it does not.
+- `/healthz`: `503 {"error":"soloist_missing"}` if binary cannot be found or downloaded.
+- Unit test: fake filesystem + fake HTTP server returning a dummy tarball; assert binary is placed at the correct path.
 
 ### Verification
 
-Inside the container:
+```bash
+# without a binary present — shim should download it
+podman run --rm -p 8080:8080 \
+  -e SOLOIST_API_KEY=test -e TEDDYCLOUD_URL=http://localhost \
+  -v ./container/soloist-data:/data:Z \
+  shim:dev
+# shim log: "soloist binary downloaded to /data/bin/soloist"
+# shim log: "soloist version: ..."
+curl -s http://localhost:8080/healthz   # → not soloist_missing
+```
+
+---
+
+## Phase 2b — Session check + pairing gate
+
+**Goal:** the shim detects whether Soloist has a stored session and surfaces a clear operator error if not.
+
+### Tasks
+
+- `internal/soloist`: `SessionChecker` — inspect `$SOLOIST_DATA_DIR` for a session file. The exact filename is determined by running Soloist once with `--pair` and observing what it writes.
+- If no session found: log a clear operator message:
+  ```
+  No Soloist session found. Run pairing once:
+    soloist --device-name <name> --api-key <key> --data-dir /data --pair
+  Then select the device in the Spotify app.
+  ```
+- Surface via `/healthz`: `503 {"error":"soloist_unpaired"}`. Do not crash-loop. Wait and re-check on an interval (30 s) so the operator can pair without restarting the container.
+- Unit test: missing session file → state is `unpaired`; present session file → state is `ready`.
+
+### Verification
 
 ```bash
+# run without a session directory
 podman run --rm -p 8080:8080 \
   -e SOLOIST_API_KEY=test -e TEDDYCLOUD_URL=http://localhost \
   shim:dev
-# shim log should show: "PulseAudio ready"
-curl -s http://localhost:8080/healthz   # → 200 OK
+curl -s http://localhost:8080/healthz   # → 503 {"error":"soloist_unpaired"}
+# shim log: clear pairing instruction
 
-# verify PulseAudio is actually up inside the container
-podman exec <ctr> pactl info
+# after pairing, restart — healthz should return 200
 ```
 
 ---
 
-## Phase 3 — Null sink + recorder
+## Phase 2c — Soloist subprocess lifecycle + WebSocket
 
-**Goal:** the shim creates the virtual audio sink and reads PCM bytes from its monitor source. No Soloist yet — silence is fine.
-
-### Tasks
-
-- `internal/audio`: `NullSink` setup (can be done via the PulseAudio load args from Phase 2 — verify the sink exists with `pactl list sinks short`).
-- `internal/recorder`: implement `audio.ChunkSource` with a `PulseRecorder` concrete type using `github.com/jfreymuth/pulse` (pure Go, no cgo). `internal/recorder` imports `internal/audio` for the interface — not the other way around.
-  - Format: `s16le`, 44100 Hz, stereo.
-  - `Chunks()` returns a buffered `chan []byte`.
-  - **Backpressure safety valve:** discard chunks when the channel is full. Prevents the PulseAudio client buffer from stalling.
-  - Recorder runs continuously and independently of any HTTP client.
-- Unit test: inject a fake reader; assert chunks arrive via `Chunks()` and that full-channel discards do not block.
-
-> **Fallback note:** if `github.com/jfreymuth/pulse` proves insufficient, implement `FFmpegRecorder` in the same package — it runs `ffmpeg -f pulse -i virtual_out.monitor -f s16le -ar 44100 -ac 2 pipe:1` via `StdoutPipe()` and satisfies `audio.ChunkSource`. `cmd/shim/main.go` swaps which concrete type it wires in. Nothing else changes.
-
-### Verification
-
-Inside the container:
-
-```bash
-# shim log should show: "recorder started, reading from virtual_out.monitor"
-# verify bytes arrive (silence from empty sink is fine at this stage):
-podman exec <ctr> parec --device=virtual_out.monitor --format=s16le | head -c 1024 | wc -c
-# → 1024  (bytes are flowing)
-```
-
----
-
-## Phase 4 — Soloist orchestration
-
-**Goal:** the shim manages the full Soloist lifecycle and holds an open WebSocket connection.
+**Goal:** the shim spawns Soloist in Connect mode, holds an open WebSocket, and handles all exit conditions.
 
 ### Tasks
 
-- `internal/soloist`: `Supervisor` struct.
-  - **Binary check:** look for `soloist` on `$PATH`, then at `$SOLOIST_DATA_DIR/bin/soloist`. If not found, download from the Spotify CDN for the detected architecture (`runtime.GOARCH`) using `net/http`. Place in `$SOLOIST_DATA_DIR/bin/soloist`, `chmod +x`.
-  - **Expiry note:** log the binary's modification time at startup. If older than 80 days, log a warning. Re-download on next startup if exit code `10` is received.
+- `internal/soloist`: `Supervisor` struct using `ProcessManager`.
   - Spawn Soloist:
     ```
     soloist --device-name $SOLOIST_DEVICE_NAME --api-key $SOLOIST_API_KEY
@@ -147,18 +138,19 @@ podman exec <ctr> parec --device=virtual_out.monitor --format=s16le | head -c 10
             --ws 127.0.0.1:0
     ```
   - Poll `$SOLOIST_DATA_DIR/ws.port` until it appears (timeout: 15 s).
-  - Open WebSocket to `ws://127.0.0.1:<ws.port>`. Send `activate` command once connected.
+  - Open WebSocket to `ws://127.0.0.1:<ws.port>`. Send `activate` once connected.
+  - Read and discard incoming WebSocket events (keeps connection healthy; `auth_state` loss detected here in future).
   - Exit-code handling:
     - `0`: unexpected — log warning, restart with exponential backoff.
     - `1`: log error, restart with backoff.
-    - `10`: log expiry error, **do not restart**, set state to `expired`.
-    - Signal/crash: restart with backoff.
+    - `10`: log expiry, delete binary, **do not restart** — set state to `expired`.
+    - Signal/crash: restart with exponential backoff.
 - `/healthz`: `503 {"error":"soloist_expired"}` when state is `expired`.
-- Unit test: fake `ProcessManager` emits exit code `10`; assert state becomes `expired` and restart is not attempted.
+- Unit test: fake `ProcessManager` emits exit code `10` → state is `expired`, no restart attempted. Emits exit code `1` → restart is attempted after backoff.
 
 ### Verification
 
-Inside the container (requires a valid paired session in `/data`):
+Inside the container (requires paired session from Phase 2b):
 
 ```bash
 podman run --rm -p 8080:8080 \
@@ -171,29 +163,73 @@ curl -s http://localhost:8080/healthz   # → 200 OK
 
 ---
 
-## Phase 5 — `/stream` endpoint
+## Phase 3 — PulseAudio orchestration + sink + recorder
 
-**Goal:** `curl /stream | ffplay` plays Spotify audio end-to-end.
+**Goal:** the shim starts PulseAudio, creates the virtual sink, and reads PCM bytes from its monitor source. No audio yet — silence is fine.
 
 ### Tasks
 
-- `internal/server`: register `GET /stream`. The handler depends on `audio.ChunkSource`, not on any concrete recorder type. `internal/server` imports `internal/audio` — it never imports `internal/recorder`.
-  - Parse `?spotify_uri=` query param. Return `400` if missing or malformed.
-  - Send WebSocket `play` command with the URI to Soloist.
-  - Write **streaming WAV header**: RIFF and data size fields both set to `0xFFFFFFFF`. Do **not** compute `0xFFFFFFFF + 36` — that overflows the 32-bit field and produces 0 bytes delivered.
-  - Drain chunks from `ChunkSource.Chunks()` into the response body until the request context is cancelled.
-  - `Content-Type: audio/wav`.
-- Unit test: inject a fake `audio.ChunkSource` with pre-filled chunks; assert WAV header is well-formed and chunks follow.
+- `internal/audiodaemon` (name TBD): implement the `AudioDaemon` interface with a `PulseAudio` concrete type wrapping a `ProcessManager`.
+  - Before spawning: set `HOME` and `XDG_RUNTIME_DIR` to writable scratch dirs (`/tmp/home`, `/tmp/runtime`) via `os.Setenv`. Avoids "Failed to create secure directory" when running with `--userns=keep-id`.
+  - Start PulseAudio:
+    ```
+    pulseaudio --exit-idle-time=-1 -n
+      --load=module-native-protocol-unix
+      --load=module-null-sink sink_name=virtual_out sink_properties=device.description=Shim_Sink
+      --daemonize=yes --log-target=stderr
+    ```
+    `module-native-protocol-unix` must be loaded explicitly with `-n` — without it no client socket is created and all clients fail with "Connection refused".
+  - Poll for the Unix socket at `$XDG_RUNTIME_DIR/pulse/native` until it appears (timeout: 10 s).
+  - Verify sink exists: `pactl list sinks short` should show `virtual_out`.
+- Implement `ChunkSource` with a `PulseRecorder` concrete type using `github.com/jfreymuth/pulse` (pure Go, no cgo).
+  - Format: `s16le`, 44100 Hz, stereo. Record from `virtual_out.monitor`.
+  - `Chunks()` returns a buffered `chan []byte`.
+  - **Backpressure safety valve:** discard chunks when channel is full — prevents PulseAudio client buffer from stalling.
+  - Runs continuously, independent of any HTTP client.
+- `/healthz`: `503` with reason if PulseAudio failed to start.
+- Unit test: fake `ProcessManager` exits immediately → `Ready()` is false, error surfaced. Fake chunk reader → chunks arrive in channel, full-channel discard does not block.
+
+> **Fallback note:** if `github.com/jfreymuth/pulse` proves insufficient, implement `FFmpegRecorder` — runs `ffmpeg -f pulse -i virtual_out.monitor -f s16le -ar 44100 -ac 2 pipe:1` via `StdoutPipe()`. Satisfies `ChunkSource`. Swap in `cmd/shim/main.go`. Nothing else changes.
 
 ### Verification
 
 Inside the container:
 
 ```bash
+podman run --rm -p 8080:8080 \
+  -e SOLOIST_API_KEY=test -e TEDDYCLOUD_URL=http://localhost \
+  shim:dev
+# shim log: "PulseAudio ready", "recorder started"
+curl -s http://localhost:8080/healthz   # → 200 OK
+podman exec <ctr> pactl info
+podman exec <ctr> parec --device=virtual_out.monitor --format=s16le | head -c 1024 | wc -c
+# → 1024 (bytes flowing — silence is fine at this stage)
+```
+
+---
+
+## Phase 4 — `/stream` endpoint
+
+**Goal:** `curl /stream | ffplay` plays Spotify audio end-to-end.
+
+### Tasks
+
+- `internal/server`: register `GET /stream`. Handler depends on the `ChunkSource` interface — never imports the concrete recorder package directly.
+  - Parse `?spotify_uri=` query param. Return `400` if missing or malformed.
+  - Send WebSocket `play` command with the URI to Soloist.
+  - Write **streaming WAV header**: RIFF and data size fields both `0xFFFFFFFF`. Do **not** compute `0xFFFFFFFF + 36` — overflows the 32-bit field, delivers 0 bytes.
+  - Drain chunks from `ChunkSource.Chunks()` into the response body until request context is cancelled.
+  - `Content-Type: audio/wav`.
+- Unit test: fake `ChunkSource` with pre-filled chunks → WAV header is well-formed, chunks follow.
+
+### Verification
+
+Inside the container (requires paired Soloist session):
+
+```bash
 curl "http://localhost:8080/stream?spotify_uri=spotify:album:<id>" | ffplay -f wav -
 # audio plays
 
-# verify non-silence
 curl -s "http://localhost:8080/stream?spotify_uri=spotify:album:<id>" | \
   ffmpeg -f wav -i pipe:0 -af volumedetect -f null - 2>&1 | grep mean_volume
 # expect ~ -38 dB, not -91 dB (digital silence)
@@ -201,9 +237,9 @@ curl -s "http://localhost:8080/stream?spotify_uri=spotify:album:<id>" | \
 
 ---
 
-## Phase 6 — `cmd/mock-teddycloud` + SSE listener
+## Phase 5 — `cmd/mock-teddycloud` + SSE listener
 
-**Goal:** full baseline integration test without a real Toniebox or Teddycloud. This is the integration gate — Phases 7–8 start only after this phase passes.
+**Goal:** full baseline integration test without a real Toniebox or Teddycloud. This is the integration gate — Phases 6–7 start only after this phase passes.
 
 ### Tasks
 
@@ -248,7 +284,7 @@ curl "http://localhost:8080/stream?spotify_uri=spotify:album:<id>" | ffplay -f w
 
 ---
 
-## Phase 7 — Hot-swap
+## Phase 6 — Hot-swap
 
 **Goal:** swapping figurines replaces the active stream with no shim restart.
 
@@ -273,11 +309,11 @@ curl "http://localhost:8080/stream?spotify_uri=spotify:album:<B>" | ffplay -f wa
 
 ---
 
-## Phase 8 — Integration with real Teddycloud
+## Phase 7 — Integration with real Teddycloud
 
 **Goal:** end-to-end test with actual hardware.
 
-Only start this phase once Phase 6 (mock-teddycloud baseline) passes completely.
+Only start this phase once Phase 5 (mock-teddycloud baseline) passes completely.
 
 ### Tasks
 
@@ -298,7 +334,7 @@ Only start this phase once Phase 6 (mock-teddycloud baseline) passes completely.
 
 ---
 
-## Phase 9 — Polish
+## Phase 8 — Polish
 
 **Goal:** production-ready codebase.
 
@@ -315,17 +351,18 @@ Only start this phase once Phase 6 (mock-teddycloud baseline) passes completely.
 ## Dependency graph
 
 ```
-Phase 1 (skeleton + Containerfile)
-  └── Phase 2 (PulseAudio orchestration)
-        └── Phase 3 (null sink + recorder)
-              └── Phase 4 (Soloist orchestration)
-                    └── Phase 5 (/stream endpoint)
-                          └── Phase 6 (mock-teddycloud + SSE listener)  ← integration gate
-                                └── Phase 7 (hot-swap)
-                                      └── Phase 8 (real Teddycloud)
-                                            └── Phase 9 (polish)
+Phase 1  (skeleton + Containerfile)
+  └── Phase 2a (Soloist binary management)
+        └── Phase 2b (session check + pairing gate)
+              └── Phase 2c (subprocess lifecycle + WebSocket)
+                    └── Phase 3  (PulseAudio + sink + recorder)
+                          └── Phase 4  (/stream endpoint)
+                                └── Phase 5  (mock-teddycloud + SSE listener)  ← integration gate
+                                      └── Phase 6  (hot-swap)
+                                            └── Phase 7  (real Teddycloud)
+                                                  └── Phase 8  (polish)
 
-Phases 2–4 can overlap with cmd/mock-teddycloud scaffolding (no dependency).
+cmd/mock-teddycloud scaffolding can be started any time after Phase 1.
 ```
 
 ---
