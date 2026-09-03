@@ -160,7 +160,7 @@ One active stream slot, protected by a mutex.
 
 ## Container
 
-Single container. Debian trixie base (glibc ≥ 2.38 required; Bookworm ships 2.36). Install `pulseaudio libatomic1 tini ca-certificates`. `tini` is PID 1. The shim binary is the sole entrypoint — no shell script.
+Single container. Debian trixie base (glibc ≥ 2.38 required; Bookworm ships 2.36; UBI 9 ships 2.34). Install `pulseaudio libatomic1 tini ca-certificates`. `tini` is PID 1. The shim binary is the sole entrypoint — no shell script.
 
 ```
 ENTRYPOINT ["/usr/bin/tini", "--", "/shim"]
