@@ -24,10 +24,10 @@ test:
 lint:
 	golangci-lint run ./...
 
-## Build the container image (amd64).
+## Build the container image locally (amd64, runnable with podman run).
 container-build:
 	@mkdir -p $(DATA_DIR)
-	podman build --platform linux/amd64 --manifest $(IMAGE):dev -f Containerfile .
+	podman build --platform linux/amd64 -t $(IMAGE):dev -f Containerfile .
 
 ## Run the shim container locally.
 container-run: container-build
@@ -35,8 +35,10 @@ container-run: container-build
 		-p 8080:8080 \
 		$(IMAGE):dev
 
-## Push the container image manifest to Docker Hub.
+## Build a multi-arch manifest and push to Docker Hub.
 container-push:
+	podman build --platform linux/amd64,linux/arm64 --manifest $(IMAGE):dev -f Containerfile .
 	podman manifest push --all $(IMAGE):dev docker://docker.io/janharings/$(IMAGE):dev
+	podman manifest rm $(IMAGE):dev
 
 .PHONY: build test lint container-build container-run container-push
