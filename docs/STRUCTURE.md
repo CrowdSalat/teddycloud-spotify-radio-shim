@@ -27,15 +27,19 @@ To keep the orchestration logic unit-testable, subprocess spawning is hidden beh
 - `go mod init github.com/janharings/teddycloud-spotify-radio-shim`
 - Package layout:
   ```
-  cmd/shim/           main entry point
+  cmd/shim/            main entry point
   cmd/mock-teddycloud/ mock SSE server (stubbed, implemented in Phase 6)
-  internal/config/    env-var config loader
-  internal/server/    HTTP server
-  internal/process/   ProcessManager interface + exec implementation
+  internal/config/     env-var config loader
+  internal/server/     HTTP server
+  internal/process/    ProcessManager interface + exec implementation
+  internal/audio/      AudioDaemon interface (implementation in Phase 2)
+  internal/recorder/   ChunkSource interface (implementation in Phase 3)
   ```
 - `internal/config`: typed struct, env-var loading, defaults, fail-fast on missing required vars. Unit tested.
 - `internal/server`: HTTP server on `LISTEN_ADDR`. `/healthz` returns `200 OK`. No other routes yet.
 - `internal/process`: define `ProcessManager` interface (start, wait, kill). Implement with `exec.Cmd`. Provide a fake implementation for tests.
+- `internal/audio`: define `AudioDaemon` interface — `Start() error`, `Ready() bool`, `Stop()`. No implementation yet.
+- `internal/recorder`: define `ChunkSource` interface — `Chunks() <-chan []byte`. No implementation yet.
 - `cmd/shim/main.go`: load config, start server, block.
 - `Containerfile`: Debian trixie base, install `pulseaudio libatomic1 tini ca-certificates`. Copy shim binary. `USER 65534:0`. `ENTRYPOINT ["/usr/bin/tini", "--", "/shim"]`.
 - `Makefile` targets: `build`, `lint`, `test`, `container-build`.
@@ -65,7 +69,7 @@ curl -s http://localhost:8080/healthz   # → 200 OK
 
 ### Tasks
 
-- `internal/audio`: `PulseAudio` struct wrapping a `ProcessManager`.
+- `internal/audio`: implement `AudioDaemon` with a `PulseAudio` concrete type wrapping a `ProcessManager`.
   - Before spawning: set `HOME` and `XDG_RUNTIME_DIR` to writable scratch dirs (`/tmp/home`, `/tmp/runtime`) via `os.Setenv`. This avoids "Failed to create secure directory" when running with `--userns=keep-id`.
   - Start PulseAudio:
     ```
@@ -104,14 +108,14 @@ podman exec <ctr> pactl info
 ### Tasks
 
 - `internal/audio`: `NullSink` setup (can be done via the PulseAudio load args from Phase 2 — verify the sink exists with `pactl list sinks short`).
-- `internal/recorder`: record from `virtual_out.monitor` using `github.com/jfreymuth/pulse` (pure Go, no cgo).
+- `internal/recorder`: implement `ChunkSource` with a `PulseRecorder` concrete type using `github.com/jfreymuth/pulse` (pure Go, no cgo).
   - Format: `s16le`, 44100 Hz, stereo.
-  - Feed chunks into a `chan []byte` (buffered).
+  - `Chunks()` returns a buffered `chan []byte`.
   - **Backpressure safety valve:** discard chunks when the channel is full. Prevents the PulseAudio client buffer from stalling.
   - Recorder runs continuously and independently of any HTTP client.
-- Unit test: inject a fake reader; assert chunks arrive in the channel and that full-channel discards do not block.
+- Unit test: inject a fake reader; assert chunks arrive via `Chunks()` and that full-channel discards do not block.
 
-> **Fallback note:** if `github.com/jfreymuth/pulse` proves insufficient, replace the recorder with an `ffmpeg -f pulse -i virtual_out.monitor -f s16le -ar 44100 -ac 2 pipe:1` subprocess via `StdoutPipe()`. The `chan []byte` interface is unchanged — only the recorder implementation changes.
+> **Fallback note:** if `github.com/jfreymuth/pulse` proves insufficient, replace `PulseRecorder` with an `FFmpegRecorder` that runs `ffmpeg -f pulse -i virtual_out.monitor -f s16le -ar 44100 -ac 2 pipe:1` via `StdoutPipe()`. It satisfies `ChunkSource` — the rest of the shim is unchanged.
 
 ### Verification
 
@@ -172,13 +176,13 @@ curl -s http://localhost:8080/healthz   # → 200 OK
 
 ### Tasks
 
-- `internal/server`: register `GET /stream`:
+- `internal/server`: register `GET /stream`. The handler depends on `ChunkSource`, not on any concrete recorder type.
   - Parse `?spotify_uri=` query param. Return `400` if missing or malformed.
   - Send WebSocket `play` command with the URI to Soloist.
   - Write **streaming WAV header**: RIFF and data size fields both set to `0xFFFFFFFF`. Do **not** compute `0xFFFFFFFF + 36` — that overflows the 32-bit field and produces 0 bytes delivered.
-  - Drain chunks from the recorder channel into the response body until the request context is cancelled.
+  - Drain chunks from `ChunkSource.Chunks()` into the response body until the request context is cancelled.
   - `Content-Type: audio/wav`.
-- Unit test: inject a fake recorder channel with pre-filled chunks; assert WAV header is well-formed and chunks follow.
+- Unit test: inject a fake `ChunkSource` with pre-filled chunks; assert WAV header is well-formed and chunks follow.
 
 ### Verification
 
