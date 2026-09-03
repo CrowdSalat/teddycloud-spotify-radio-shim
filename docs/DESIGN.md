@@ -9,16 +9,17 @@ For Spotify Soloist specifics, see [research/spotify-soloist.md](research/spotif
 
 Two things cannot be decided from documentation alone. They require a running Soloist binary.
 
-### Blocker 1: Does `--single-track` accept album URIs?
+### Blocker 1: Does `--single-track` accept album URIs? ✅ RESOLVED
 
-The Soloist CLI flag `--single-track URI` is documented as "for one Spotify URI, not broader playback contexts." It never explicitly lists which URI types are accepted. The phrase "not broader playback contexts" most likely describes exit behaviour (plays the URI and exits), not a restriction to track-only URIs.
+**Result (2026-09-03):** `--single-track` accepts **track URIs only**. Album and playlist URIs are rejected.
 
-**Test:** run `soloist --single-track spotify:album:<id>` with a paired session. Observe whether playback starts or Soloist exits with code `1`.
+| URI type | Result | Exit code |
+|---|---|---|
+| `spotify:track:<id>` | Plays and exits | `0` |
+| `spotify:album:<id>` | Rejected: "`--single-track requires a valid single playable Spotify URI`" | `1` |
+| `spotify:playlist:<id>` | Rejected: "`--single-track requires a valid single playable Spotify URI`" | `1` |
 
-| Outcome | Consequence |
-|---|---|
-| Album plays, Soloist exits when done | Single-track mode works for all URI types. Simplest design. |
-| Soloist exits with code `1` | Albums and playlists require Spotify Connect mode + WebSocket `play` command. Slightly more complex process model (see below). |
+**Consequence:** Albums and playlists cannot be played in single-track mode. The design must use **Spotify Connect mode + WebSocket `play` command** (the fallback described below). Single-track mode remains viable only if the shim can resolve album/playlist URIs down to individual tracks before calling Soloist — but the requirements imply figurines map to albums/playlists, so Connect mode is the primary target.
 
 ### Blocker 2: Can audio be captured from a headless PulseAudio null sink?
 
@@ -101,9 +102,9 @@ The current working assumption is a **single container**, shown below.
 
 ### Runtime mode
 
-**Single-track mode** is the primary target. The shim starts a new Soloist process for each URI request. Soloist plays the URI and exits.
+**Spotify Connect mode** is the primary target (per Blocker 1 result). One long-running Soloist process stays active; each URI request is sent via the WebSocket `play` command. This is required because albums and playlists — which figurines map to — are rejected by `--single-track`.
 
-If Blocker 1 shows that album/playlist URIs are rejected in single-track mode, the fallback is **Spotify Connect mode**: one long-running Soloist process, URI changes sent via WebSocket `play` command.
+Single-track mode (`--single-track <track-URI>`, spawn-per-request) is retained only as a potential optimization or fallback where a figurine is known to map to exactly one track. The design below follows the Connect-process model.
 
 ### Startup command
 
@@ -113,9 +114,10 @@ soloist \
   --api-key "$SOLOIST_API_KEY" \
   --data-dir /data \
   --cache-dir /cache \
-  --ws 127.0.0.1:0 \
-  --single-track <URI>
+  --ws 127.0.0.1:0
 ```
+
+No `--single-track` flag. Soloist runs as a long-lived Spotify Connect device. The shim sends URI changes via the WebSocket `play` command.
 
 `--ws 127.0.0.1:0` — OS picks the port. The shim reads the actual port from `/data/ws.port` after Soloist starts.
 
@@ -125,7 +127,7 @@ Soloist writes `ws.addr` and `ws.port` into the data directory once the WebSocke
 
 ### Pairing (one-time setup)
 
-Before single-track mode works, a session must be stored. The operator runs:
+Before Connect mode works, a session must be stored. The operator runs:
 
 ```
 soloist --device-name "teddycloud-spotify-shim" --api-key "$SOLOIST_API_KEY" --data-dir /data --pair
@@ -141,7 +143,7 @@ Soloist binaries expire after 90 days. Exit code `10` signals expiry. The shim s
 
 The supervisor wraps the Soloist subprocess and handles:
 - Startup: wait for `ws.port` file to appear before declaring ready
-- Normal exit `0`: expected end of single-track playback, no restart
+- Normal exit `0`: unexpected for a long-running Connect device; log and restart with backoff
 - Exit code `10`: log expiry error, do not restart, surface via `/healthz`
 - Exit code `1`: log error, optionally retry with backoff
 - Crash (signal): restart with exponential backoff
@@ -221,7 +223,7 @@ The SSE listener must reconnect automatically if Teddycloud restarts or the conn
 When Teddycloud requests `/stream` with a new URI while a stream is already active:
 
 1. Shim cancels the previous stream's HTTP response context.
-2. Shim starts a new Soloist subprocess with the new URI (single-track mode), or sends `play` with the new URI via WebSocket (Connect mode).
+2. Shim sends the WebSocket `play` command with the new URI to the running Soloist process (Connect mode).
 3. The recorder keeps running — PulseAudio monitor source is always open.
 4. The new HTTP response starts reading from the channel.
 
@@ -276,7 +278,7 @@ All configuration via environment variables.
 
 These depend on the blocker test results but do not block further design work.
 
-1. **Single-track vs Connect mode** — resolved by Blocker 1.
+1. **Single-track vs Connect mode** — resolved by Blocker 1: **Connect mode**, since `--single-track` rejects album/playlist URIs.
 2. **PulseAudio vs PipeWire** — Soloist prefers PipeWire. If the null-sink approach works with PulseAudio alone (via `pipewire-pulse` compatibility layer or native PulseAudio), no PipeWire daemon is needed. If Soloist requires native PipeWire, the container needs PipeWire + WirePlumber + pipewire-pulse.
 3. **Startup ordering** — PulseAudio must be ready before Soloist starts (Soloist connects to PulseAudio at launch). The entrypoint script must wait for the PulseAudio socket before starting Soloist.
 4. **Seek on resume** — when a figurine is lifted and placed again, should playback resume from where it paused (default Spotify behaviour) or restart from the beginning? Default Spotify behaviour (resume from position) is assumed.

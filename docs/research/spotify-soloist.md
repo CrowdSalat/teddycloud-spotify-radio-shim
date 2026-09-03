@@ -66,24 +66,31 @@ On subsequent starts, Soloist restores the stored session automatically. The ses
 | **Single-track mode** | `--single-track URI` | Restores stored session, plays one URI, exits when done |
 
 Single-track mode:
+- Accepts **track URIs only** (album/playlist URIs are rejected with exit code `1`, verified 2026-09-03)
 - Does not advertise a new Spotify Connect device
 - Starts with shuffle and repeat disabled
 - Remote control and playback transfer disabled for that context
 - Exits when the item finishes, stops, or changes
 
-**For this project:** single-track mode is the intended runtime mode. The shim starts Soloist per-URI and captures the audio output.
+**For this project:** Spotify Connect mode (default) is the intended runtime mode — one long-running Soloist process, `play` commands over WebSocket — because `--single-track` rejects album/playlist URIs (verified, see below).
 
-### Accepted URI types in single-track mode
+### Accepted URI types in single-track mode — VERIFIED (2026-09-03)
 
 The docs say `--single-track` is "for one Spotify URI, not broader playback contexts." Exit code `1` includes "invalid single-track URI" as a failure reason.
 
-The phrase "not broader playback contexts" describes **behaviour**, not URI type filtering. It means: Soloist exits after the URI finishes; it does not continue playing the surrounding playlist or album queue. It does not mean album or playlist URIs are rejected.
+The phrase "not broader playback contexts" describes **behaviour**, not URI type filtering. It means: Soloist exits after the URI finishes; it does not continue playing the surrounding playlist or album queue. It does **not** mean album or playlist URIs are rejected — as it happens, they are, but for a different reason.
 
-The WebSocket `play` command explicitly lists "track, album, playlist, or episode" as accepted types. The `--single-track` docs never enumerate accepted types.
+The WebSocket `play` command explicitly lists "track, album, playlist, or episode" as accepted types.
 
-**Working hypothesis:** `--single-track` accepts any single playable URI including albums and playlists. An album URI plays the album and Soloist exits when the album ends.
+**Empirical test result (Soloist 1.3.8.4):**
 
-**Must be verified empirically** — pass an album URI (`spotify:album:...`) to `--single-track` and observe whether it starts playback or exits with code `1`.
+| URI type | Result | Exit code |
+|---|---|---|
+| `spotify:track:<id>` | Plays and exits | `0` |
+| `spotify:album:<id>` | Rejected: "`--single-track requires a valid single playable Spotify URI`" | `1` |
+| `spotify:playlist:<id>` | Rejected: "`--single-track requires a valid single playable Spotify URI`" | `1` |
+
+**Conclusion:** `--single-track` accepts **track URIs only**. Albums and playlists are rejected despite being "playable URIs". This contradicts the earlier working hypothesis. The WebSocket `play` command accepts all URI types, so it is the correct mechanism for albums/playlists. Single-track mode is only usable for track-level playback.
 
 ---
 
@@ -321,7 +328,7 @@ Verified against Soloist v1.3.8 (build 20260902):
 |---|---|
 | **90-day expiry** | Container image or update mechanism must refresh the binary before expiry. Expiry check on startup (exit code `10`) must be handled by the shim supervisor |
 | **No redistribution** | Binary cannot be baked into a public container image. Must be downloaded at container start or as part of a private build |
-| **Single-track URI types** | Docs say "not broader playback contexts" but never list forbidden URI types. Working hypothesis: album and playlist URIs are accepted, "not broader contexts" describes exit behaviour only. **Needs empirical verification.** Fallback: Connect mode + WebSocket `play` command covers all URI types definitively |
+| **Single-track URI types** | **RESOLVED (2026-09-03):** `--single-track` accepts track URIs only. Album/playlist URIs are rejected with exit code `1` ("valid single playable Spotify URI"). Use Connect mode + WebSocket `play` command, which covers all URI types |
 | **Session persistence** | Data directory must survive pod restarts (PVC mount). Removing it forces re-pairing |
 | **No config file** | All config is CLI flags. The shim must construct and manage the command line |
 | **WS port discovery** | Using `--ws 0` means the shim must read `ws.port` from the data directory after Soloist starts |
