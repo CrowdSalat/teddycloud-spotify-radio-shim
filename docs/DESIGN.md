@@ -50,6 +50,13 @@ The shim owns three subprocesses:
 
 All subprocess spawning is behind a `ProcessManager` interface so the state machine is unit-testable without binaries on `$PATH`.
 
+Two additional interfaces keep audio backend concerns isolated:
+
+- **`AudioDaemon`** — `Start()`, `Ready()`, `Stop()`. The PulseAudio implementation satisfies this. A future PipeWire implementation would satisfy the same interface. Nothing outside `internal/audio` touches PulseAudio directly.
+- **`ChunkSource`** — produces `chan []byte`. The `github.com/jfreymuth/pulse` recorder satisfies this. The ffmpeg-subprocess fallback satisfies the same interface. The `/stream` handler never knows which backend is running.
+
+To switch from PulseAudio to PipeWire later: implement `AudioDaemon` for PipeWire (different packages, different startup sequence, `pipewire` + `wireplumber` processes). The recorder does not change — `pipewire-pulse` makes PulseAudio protocol clients work against PipeWire transparently. Only the container packages and the daemon orchestration change.
+
 ### PulseAudio
 
 Started by the shim before Soloist. Required args (verified — see research):
