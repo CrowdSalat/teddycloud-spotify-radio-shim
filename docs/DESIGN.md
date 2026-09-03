@@ -50,10 +50,21 @@ The shim owns three subprocesses:
 
 All subprocess spawning is behind a `ProcessManager` interface so the state machine is unit-testable without binaries on `$PATH`.
 
-Two additional interfaces keep audio backend concerns isolated:
+Two additional interfaces keep audio backend concerns isolated. Both live in `internal/audio/` — interfaces belong to the consumer, and the audio layer is what consumes these capabilities.
 
-- **`AudioDaemon`** — `Start()`, `Ready()`, `Stop()`. The PulseAudio implementation satisfies this. A future PipeWire implementation would satisfy the same interface. Nothing outside `internal/audio` touches PulseAudio directly.
-- **`ChunkSource`** — produces `chan []byte`. The `github.com/jfreymuth/pulse` recorder satisfies this. The ffmpeg-subprocess fallback satisfies the same interface. The `/stream` handler never knows which backend is running.
+- **`AudioDaemon`** — `Start()`, `Ready()`, `Stop()`. Defined in `internal/audio/`. The `PulseAudio` concrete type in the same package satisfies it. A future `PipeWire` type would satisfy the same interface. Nothing outside `internal/audio/` touches PulseAudio directly.
+- **`ChunkSource`** — `Chunks() <-chan []byte`. Defined in `internal/audio/`. `internal/recorder/` imports `internal/audio/` and provides concrete implementations (`PulseRecorder`, `FFmpegRecorder`). `internal/server/` imports `internal/audio/` for the type — it never imports `internal/recorder/` directly.
+
+Dependency direction:
+```
+internal/audio/     defines AudioDaemon, ChunkSource
+      ↑
+internal/recorder/  implements ChunkSource
+      ↑
+cmd/shim/           wires concrete types to interfaces
+      ↓
+internal/server/    consumes ChunkSource via audio.ChunkSource
+```
 
 To switch from PulseAudio to PipeWire later: implement `AudioDaemon` for PipeWire (different packages, different startup sequence, `pipewire` + `wireplumber` processes). The recorder does not change — `pipewire-pulse` makes PulseAudio protocol clients work against PipeWire transparently. Only the container packages and the daemon orchestration change.
 
