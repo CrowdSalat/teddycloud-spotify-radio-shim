@@ -307,6 +307,29 @@ The ALSA loopback alternative (`snd_aloop`) requires loading a kernel module and
 
 **Recommendation:** PulseAudio null sink + `github.com/jfreymuth/pulse` for direct Go integration, with `pipewire-pulse` optionally layered on top if Soloist requires PipeWire on the target system.
 
+### VERIFIED: PulseAudio-only capture works (2026-09-03)
+
+Tested in a headless container (no sound card) with a real Spotify session (Soloist 1.3.8.4, build 20260903). Soloist plays to a PulseAudio null sink; the monitor source is captured and streamed as WAV over HTTP. Confirmed:
+
+- Soloist **accepts a PulseAudio-only environment** (no PipeWire daemon) and falls back to PulseAudio cleanly.
+- **Real-time timing**: `parec` from `virtual_out.monitor` yields real-time rate-limited PCM.
+- Format `pcm_s16le 44100 Hz stereo`; volume shows actual music (`mean_volume ≈ -38 dB`) vs pure silence (`-91 dB`) when idle.
+- WebSocket `play` command drives playback end-to-end.
+
+**Pitfalls found in practice:**
+
+- Container is run with `--userns=keep-id --user <uid>:<gid>`, which sets `HOME=/` and leaves `XDG_RUNTIME_DIR` empty. PulseAudio refuses to start without proper values (`Failed to create secure directory (//.config/pulse)`). Pin both to writable scratch dirs in the entrypoint.
+- Starting PulseAudio with `-n` (no default config) requires loading `module-native-protocol-unix` explicitly, or no client socket is created and `pactl`/`parec`/Soloist fail with "Connection refused". Load it alongside `module-null-sink`:
+  ```
+  pulseaudio --exit-idle-time=-1 -n \
+    --load="module-native-protocol-unix" \
+    --load="module-null-sink sink_name=virtual_out sink_properties=device.description=Shim_Sink" \
+    --daemonize=yes --log-target=stderr
+  ```
+- For a **streaming** HTTP WAV (unknown length), put `0xFFFFFFFF` in both the RIFF and data size fields. Do not write `0xFFFFFFFF + 36` — it overflows the 32-bit field and the writer errors out with 0 bytes delivered.
+- `parec --file-format=wav` cannot write to a pipe/FIFO (needs to seek). Stream raw PCM and prepend your own WAV header.
+- A flowing monitor link with nothing playing still emits bytes (digital silence, `-91 dB`). Verify actual audio with `ffmpeg -af volumedetect` rather than just "bytes > 0".
+
 ---
 
 ## Runtime environment requirements (verified)
@@ -317,7 +340,7 @@ Verified against Soloist v1.3.8 (build 20260902):
 |---|---|
 | **glibc >= 2.38** | Bookworm ships 2.36 — too old. Use Debian **trixie** or Ubuntu 24.04 as the base image. |
 | **libatomic.so.1** | Not present in all base images. Install `libatomic1` explicitly. |
-| **PulseAudio null sink** | Confirmed working: `virtual_out` at s16le 44100Hz stereo, `virtual_out.monitor` available for recording. |
+| **PulseAudio null sink** | **VERIFIED (2026-09-03):** `virtual_out` at s16le 44100Hz stereo, `virtual_out.monitor` recordable while Soloist plays. Must load `module-native-protocol-unix` explicitly (see capture pitfalls below). |
 | **PulseAudio startup** | Must use `-n --file=` to load only required modules. Without `-n`, the system default config conflicts. No D-Bus required. |
 
 ---

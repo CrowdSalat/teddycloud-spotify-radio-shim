@@ -1,0 +1,53 @@
+# Containerfile.blocker2
+#
+# Tests Blocker 2 from DESIGN.md:
+#   Can audio be captured from a headless PulseAudio null sink?
+#
+# The image starts PulseAudio with a null sink, launches Soloist in Connect
+# mode, records from the monitor source, and validates that audio bytes arrive.
+#
+# Usage:
+#   export SOLOIST_API_KEY=<key>
+#   podman build --platform linux/amd64 -t soloist-blocker2 \
+#     -f Containerfile.blocker2 .
+#   podman run --rm --network host \
+#     --userns=keep-id --user $(id -u):$(id -g) \
+#     -v ./container/soloist-data:/data:Z \
+#     -e SOLOIST_API_KEY \
+#     soloist-blocker2
+#
+# Requirements:
+#   glibc >= 2.38  → Debian trixie (2.39)
+#   libatomic1     → install explicitly
+#   Soloist CDN    → downloaded at build time
+
+FROM debian:trixie-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl ffmpeg libatomic1 pulseaudio python3 tini \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG TARGETARCH
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+        amd64) CDN_ARCH=x86_64 ;; \
+        arm64) CDN_ARCH=arm64  ;; \
+        *) echo "Unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://soloist-builds.spotifycdn.com/soloist_release_${CDN_ARCH}.tar.gz" \
+        -o /tmp/soloist.tar.gz; \
+    tar -xzf /tmp/soloist.tar.gz -C /usr/local/bin; \
+    rm /tmp/soloist.tar.gz; \
+    chmod 755 /usr/local/bin/soloist
+
+RUN mkdir -p /data /cache /tmp/test \
+    && chmod 775 /data /cache /tmp/test \
+    && chgrp 0 /data /cache /tmp/test
+
+COPY container/blocker2-test.sh /usr/local/bin/blocker2-test.sh
+COPY container/stream-test.sh /usr/local/bin/stream-test.sh
+RUN chmod 755 /usr/local/bin/blocker2-test.sh /usr/local/bin/stream-test.sh
+
+VOLUME ["/data"]
+
+ENTRYPOINT ["tini", "--", "blocker2-test.sh"]

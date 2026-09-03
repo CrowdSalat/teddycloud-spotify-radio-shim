@@ -21,7 +21,7 @@ Two things cannot be decided from documentation alone. They require a running So
 
 **Consequence:** Albums and playlists cannot be played in single-track mode. The design must use **Spotify Connect mode + WebSocket `play` command** (the fallback described below). Single-track mode remains viable only if the shim can resolve album/playlist URIs down to individual tracks before calling Soloist — but the requirements imply figurines map to albums/playlists, so Connect mode is the primary target.
 
-### Blocker 2: Can audio be captured from a headless PulseAudio null sink?
+### Blocker 2: Can audio be captured from a headless PulseAudio null sink? ✅ RESOLVED
 
 Soloist outputs audio to PipeWire or PulseAudio only. There is no pipe or file output. The proposed approach is:
 
@@ -29,12 +29,42 @@ Soloist outputs audio to PipeWire or PulseAudio only. There is no pipe or file o
 2. Soloist plays to the null sink.
 3. The shim records from the null sink's `.monitor` source.
 
-**Test:** run PulseAudio with a null sink in a container (no sound card), start Soloist against it, record from `virtual_out.monitor`, verify audio bytes arrive and are valid PCM.
+**Result (2026-09-03):** Yes. Confirmed end-to-end with a real Spotify session (Soloist 1.3.8.4, build 20260903) in a headless container (no sound card):
 
-Unknowns:
-- Does Soloist accept a PulseAudio-only environment (no PipeWire available)?
-- Does the null sink `.monitor` source produce audio with correct timing (real-time rate-limited)?
-- Is `github.com/jfreymuth/pulse` sufficient, or is a subprocess recorder needed?
+```
+Soloist —libpulse→ PulseAudio null sink → virtual_out.monitor → parec / Go lib → WAV HTTP stream
+```
+
+- Soloist accepted a **PulseAudio-only** environment (no PipeWire daemon — it falls back cleanly).
+- Audio arrived at realistic timing: `parec` captured real-time rate-limited PCM.
+- Recorded audio validated as `pcm_s16le 44100Hz stereo`; volume showed actual music (`mean_volume ≈ -38 dB`), not silence (`-91 dB`), confirming real audio passed through the monitor while playing.
+
+**Test tooling added to this repo:**
+
+| File | Purpose |
+|---|---|
+| `Containerfile.blocker2` | Test image: PulseAudio + Soloist + python3 + parec + ffmpeg |
+| `container/blocker2-test.sh` | Automated capture + validation (pass/fail) |
+| `container/stream-test.sh` | Live listen: streams `virtual_out.monitor` as WAV over HTTP on `:8000` (for `ffplay`, and to eyeball the pipeline) |
+| `Makefile` targets | `blocker2-build`, `blocker2-test`, `stream-test` |
+
+**Noteworthy findings / gotchas discovered while testing:**
+
+- **`--userns=keep-id --user <uid>:<gid>` sets `HOME=/` and leaves `XDG_RUNTIME_DIR` empty.** PulseAudio needs both. Pin them to owned scratch dirs in the entrypoint (e.g. `XDG_RUNTIME_DIR=/tmp/runtime-shim`, `HOME=/tmp/home-shim`), else PulseAudio fails with `Failed to create secure directory (//.config/pulse)`.
+- **With `-n` (no default config) you MUST also load `module-native-protocol-unix`.** Loading only `module-null-sink` starts PulseAudio but creates no client socket, so `pactl`/`parec`/Soloist get "Connection refused" and `pactl list` shows only a stale `pid` file under the runtime dir. Load both:
+  ```
+  pulseaudio --exit-idle-time=-1 -n \
+    --load="module-native-protocol-unix" \
+    --load="module-null-sink sink_name=virtual_out sink_properties=device.description=Shim_Sink" \
+    --daemonize=yes --log-target=stderr
+  ```
+- **Streaming WAV header must use `0xFFFFFFFF` raw for the RIFF size.** `0xFFFFFFFF + 36` overflows the 32-bit field and crashes the writer (`OverflowError: int too big to convert`), producing `http_code=200` with **0 bytes**. ffmpeg/ffplay accepts `0xFFFFFFFF` on both size fields as "unknown length".
+- **`parec --file-format=wav` cannot write to a pipe/FIFO** (it needs to seek to patch the header). Stream raw PCM (`parec --format=s16le --rate=44100 --channels=2`) and have the server write the 44-byte WAV header itself.
+- **Silence vs noise check:** a working monitor link with no playback yields clean `-91 dB` (digital silence). Don't mistake flowing bytes for audio; verify with `ffmpeg -af volumedetect` that volume is much higher during playback.
+- **Control via WebSocket works** (needed for the test): a stdlib-only Python script can send `{"type":"command","command":"play"}`; a `playback_state` → `buffering` → `playing` transition with `command_result` and `device_changed is_active:true` confirms accepted and playing.
+
+Unknowns remaining after the test:
+- `github.com/jfreymuth/pulse` (pure Go) versus the `parec`/`ffmpeg -f pulse` subprocess — confirmed `parec` works; the Go library path is validated during shim implementation.
 
 ---
 
@@ -177,11 +207,12 @@ Soloist ──libpulse──▶ PulseAudio null sink
 PulseAudio runs inside the container with no physical sound card. Configuration:
 
 ```
-load-module module-null-sink sink_name=virtual_out sink_properties=device.description="Shim_Sink"
-set-default-sink virtual_out
+pulseaudio --exit-idle-time=-1 -n \
+  --load="module-native-protocol-unix" \
+  --load="module-null-sink sink_name=virtual_out sink_properties=device.description=\"Shim_Sink\""
 ```
 
-Run with `--exit-idle-time=-1` so it does not quit when Soloist is between tracks.
+`--exit-idle-time=-1` keeps it alive between tracks. With `-n` (no default config), `module-native-protocol-unix` must be loaded explicitly or no client socket is created. Set `XDG_RUNTIME_DIR` and `HOME` to writable scratch dirs (with `--userns=keep-id` these often default to `/` and empty).
 
 ### Recorder
 
