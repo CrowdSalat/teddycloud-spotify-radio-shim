@@ -1,6 +1,6 @@
 # Makefile
 
-IMAGE    ?= shim
+IMAGE    ?= teddycloud-spotify-shim
 DATA_DIR ?= $(CURDIR)/container/data
 ENV_FILE ?= $(CURDIR)/container/.env
 
