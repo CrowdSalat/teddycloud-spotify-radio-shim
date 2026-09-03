@@ -10,6 +10,7 @@ import (
 
 	"github.com/janharings/teddycloud-spotify-radio-shim/internal/config"
 	"github.com/janharings/teddycloud-spotify-radio-shim/internal/server"
+	"github.com/janharings/teddycloud-spotify-radio-shim/internal/soloist"
 )
 
 func main() {
@@ -25,6 +26,17 @@ func main() {
 	defer cancel()
 
 	srv := server.New(cfg.ListenAddr)
+
+	// Phase 2a: resolve Soloist binary before starting anything else.
+	bm := &soloist.BinaryManager{
+		ExplicitPath: cfg.SoloistBin,
+		DataDir:      cfg.SoloistDataDir,
+	}
+
+	if _, err := bm.Resolve(); err != nil {
+		slog.Error("soloist binary unavailable", "err", err)
+		srv.SetUnhealthy("soloist_missing")
+	}
 
 	if err := srv.Run(ctx); err != nil {
 		slog.Error("server error", "err", err)
