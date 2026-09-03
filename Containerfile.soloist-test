@@ -1,0 +1,64 @@
+# Containerfile.soloist-test
+#
+# Minimal image for testing Spotify Soloist locally.
+# Resolves Blocker 1: does --single-track accept album/playlist URIs?
+#
+# Usage:
+#   podman build --platform linux/amd64,linux/arm64 \
+#     --manifest soloist-test Containerfile.soloist-test -f Containerfile.soloist-test
+#
+#   # One-time pairing (run on just your local arch):
+#   podman run --rm -it -v ./data:/data \
+#     -e SOLOIST_API_KEY=<key> \
+#     soloist-test \
+#     soloist --device-name test --api-key "$SOLOIST_API_KEY" --data-dir /data --pair
+#
+#   # Test --single-track with an album URI:
+#   podman run --rm -it -v ./data:/data \
+#     -e SOLOIST_API_KEY=<key> \
+#     soloist-test \
+#     soloist --device-name test --api-key "$SOLOIST_API_KEY" --data-dir /data \
+#     --single-track spotify:album:00Pxqrupz6xjkI0vd4OtxbC
+#   echo "Exit: $?"
+#
+# Requirements:
+#   glibc >= 2.38  → Debian trixie (2.39) or Ubuntu 24.04
+#   libatomic1     → install explicitly
+#   Soloist CDN    → downloaded at build time per architecture
+
+FROM debian:trixie-slim
+
+# Install Soloist runtime dependencies.
+# libatomic1 is not always pulled in by default; add it explicitly.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl libatomic1 tini \
+    && rm -rf /var/lib/apt/lists/*
+
+# Download the correct Soloist binary for the current build architecture.
+# TARGETARCH is set by BuildKit: "amd64" or "arm64".
+# CDN filenames use: x86_64 / arm64.
+ARG TARGETARCH
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+        amd64) CDN_ARCH=x86_64 ;; \
+        arm64) CDN_ARCH=arm64  ;; \
+        *) echo "Unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://soloist-builds.spotifycdn.com/soloist_release_${CDN_ARCH}.tar.gz" \
+        -o /tmp/soloist.tar.gz; \
+    tar -xzf /tmp/soloist.tar.gz -C /usr/local/bin; \
+    rm /tmp/soloist.tar.gz; \
+    chmod 755 /usr/local/bin/soloist
+
+# Data and cache directories.
+# Mount a host directory at /data to persist the Soloist session across runs.
+RUN mkdir -p /data /cache \
+    && chmod 775 /data /cache \
+    && chgrp 0 /data /cache
+
+# Run as nobody:root for OpenShift restricted-v2 SCC compatibility.
+USER 65534:0
+
+VOLUME ["/data", "/cache"]
+
+ENTRYPOINT ["tini", "--", "soloist"]
