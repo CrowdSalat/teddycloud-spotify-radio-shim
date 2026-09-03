@@ -19,3 +19,6 @@ Thumbs.db
 # Secrets
 container/.env
 *.env
+
+# Soloist session data (device auth)
+container/soloist-data/
