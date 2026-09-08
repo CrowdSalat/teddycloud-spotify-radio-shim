@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/janharings/teddycloud-spotify-radio-shim/internal/audio"
 	"github.com/janharings/teddycloud-spotify-radio-shim/internal/config"
 	"github.com/janharings/teddycloud-spotify-radio-shim/internal/process"
 	"github.com/janharings/teddycloud-spotify-radio-shim/internal/server"
@@ -34,6 +35,20 @@ func main() {
 	defer cancel()
 
 	srv := server.New(cfg.ListenAddr)
+
+	// Phase 3a: PulseAudio daemon + virtual sink. SetupEnv runs synchronously so
+	// every later subprocess (Soloist, pactl) inherits HOME and XDG_RUNTIME_DIR.
+	pa := &audio.PulseAudio{
+		Manager: process.ExecManager{},
+		Health:  srv.SetUnhealthy,
+	}
+
+	if err := pa.SetupEnv(); err != nil {
+		slog.Error("pulseaudio: env setup failed", "err", err)
+	}
+
+	defer pa.Stop()
+	go pa.Run(ctx)
 
 	// Phase 2a: resolve Soloist binary before starting anything else.
 	bm := &soloist.BinaryManager{

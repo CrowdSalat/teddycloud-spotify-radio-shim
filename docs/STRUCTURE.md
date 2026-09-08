@@ -192,23 +192,41 @@ curl -s http://localhost:8080/healthz   # → 200 OK
       --daemonize=yes --log-target=stderr
     ```
     `module-native-protocol-unix` must be loaded explicitly with `-n` — without it no client socket is created and all clients fail with "Connection refused".
+    `--daemonize=yes` is required: a foreground daemon stalls for ~10 s on unreachable D-Bus lookups in the trixie base image before binding the socket. Daemonize detaches the daemon from the spawned launcher, so crash detection cannot use `Wait()` — use the PID-file probe below.
   - Poll for the Unix socket at `$XDG_RUNTIME_DIR/pulse/native` until it appears (timeout: 10 s).
   - Verify sink exists: `pactl list sinks short` must show `virtual_out`.
-- `/healthz`: `503` with reason if PulseAudio failed to start.
-- Unit test: fake `ProcessManager` exits immediately → `Ready()` is false, error surfaced.
+  - Set default sink: `pactl set-default-sink virtual_out` — ensures Soloist routes audio to the virtual sink without explicit targeting.
+- `Stop()`: send `pactl exit`, wait for the daemon to disappear (PID-file probe, grace ~3 s), then SIGTERM/SIGKILL the PID from `$XDG_RUNTIME_DIR/pulse/pid` as fallback.
+- Crash recovery: the daemon is detached, so probe its PID file (`$XDG_RUNTIME_DIR/pulse/pid` + `/proc/<pid>/comm`) every ~2 s. When the probe fails, restart with exponential backoff. Remove the stale `native` socket + `pid` files before each respawn so the restart binds cleanly. Surface the failure via `/healthz` while restarting.
+- `/healthz`: `503 {"error":"pulseaudio_not_ready"}` if PulseAudio failed to start or has crashed and is restarting.
+- Unit tests:
+  - Fake `ProcessManager` daemonizer exits non-zero → `Ready()` is false, error surfaced.
+  - Probe starts passing after startup then fails → `Ready()` transitions to false, crash recovery restarts, backoff increases.
+  - `Stop()` called → `pactl exit` is issued and the daemon is gone.
 
 ### Verification
 
 Inside the container:
 
 ```bash
+# pactl/parec ship in pulseaudio-utils — the pulseaudio package alone does not
+# include them; make sure the Containerfile installs both.
 podman run --rm -p 8080:8080 \
   -e SOLOIST_API_KEY=test -e TEDDYCLOUD_URL=http://localhost \
   shim:dev
 # shim log: "PulseAudio ready"
 curl -s http://localhost:8080/healthz   # → 200 OK
-podman exec <ctr> pactl info
-podman exec <ctr> pactl list sinks short   # → virtual_out present
+podman exec <ctr> pactl info                    # → Default Sink: virtual_out
+podman exec <ctr> pactl list sinks short        # → virtual_out present
+
+# crash recovery: kill PulseAudio, shim should notice and restart it
+podman exec <ctr> sh -c 'kill -9 $(cat /tmp/runtime/pulse/pid)'
+sleep 3
+curl -s http://localhost:8080/healthz           # → 503 {"error":"pulseaudio_not_ready"} (while restarting)
+sleep 5
+curl -s http://localhost:8080/healthz           # → 200 OK (recovered)
+podman exec <ctr> pactl list sinks short        # → virtual_out present again
+# shim log: "pulseaudio: daemon not reachable, restarting (attempt N)"
 ```
 
 ---
