@@ -3,6 +3,7 @@ package process
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os/exec"
 )
@@ -57,4 +58,20 @@ func (p *execProcess) Kill() error {
 
 func (p *execProcess) Stdout() io.Reader {
 	return p.stdout
+}
+
+// ExitCode extracts the exit code from an error returned by Process.Wait.
+// A nil error means exit code 0. If the error is not an *exec.ExitError or
+// does not carry a valid exit code, ExitCode returns -1.
+func ExitCode(err error) int {
+	if err == nil {
+		return 0
+	}
+
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode()
+	}
+
+	return -1
 }

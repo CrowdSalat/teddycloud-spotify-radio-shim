@@ -76,7 +76,6 @@ curl -s http://localhost:8080/healthz   # → 200 OK
   - Check binary age: if modification time older than 80 days, log a warning. On exit code `10` (expiry): delete binary so next startup re-downloads.
   - Smoke-test: run `soloist --version` (or equivalent) to confirm the binary executes. Fail fast if it does not.
 - `/healthz`: `503 {"error":"soloist_missing"}` if binary cannot be found or downloaded.
-- Unit test: fake filesystem + fake HTTP server returning a dummy tarball; assert binary is placed at the correct path.
 
 ### Verification
 
@@ -93,33 +92,45 @@ curl -s http://localhost:8080/healthz   # → not soloist_missing
 
 ---
 
-## Phase 2b — Session check + pairing gate
+## Phase 2b — Session check + auto-pairing gate
 
-**Goal:** the shim detects whether Soloist has a stored session and surfaces a clear operator error if not.
+**Goal:** the shim detects whether Soloist has a stored session and, when it does not, drives the one-time Spotify Connect pairing itself — no manual `soloist --pair` run or host-side step required.
 
 ### Tasks
 
-- `internal/soloist`: `SessionChecker` — inspect `$SOLOIST_DATA_DIR` for a session file. The exact filename is determined by running Soloist once with `--pair` and observing what it writes.
-- If no session found: log a clear operator message:
+- `internal/soloist`: `SessionChecker` — inspect `$SOLOIST_DATA_DIR/settings/Users` for a stored session. The exact filename is determined by running Soloist once with `--pair` and observing what it writes.
+- When unpaired, the shim spawns Soloist in pair mode itself:
   ```
-  No Soloist session found. Run pairing once:
-    soloist --device-name <name> --api-key <key> --data-dir /data --pair
-  Then select the device in the Spotify app.
+  soloist --device-name $SOLOIST_DEVICE_NAME --api-key $SOLOIST_API_KEY
+          --data-dir $SOLOIST_DATA_DIR --cache-dir $SOLOIST_CACHE_DIR --pair
   ```
-- Surface via `/healthz`: `503 {"error":"soloist_unpaired"}`. Do not crash-loop. Wait and re-check on an interval (30 s) so the operator can pair without restarting the container.
-- Unit test: missing session file → state is `unpaired`; present session file → state is `ready`.
+  The device name always comes from `$SOLOIST_DEVICE_NAME` — never a hardcoded value — so the device the operator selects in the Spotify app matches the name the shim advertises at runtime.
+- Log the app-side action for the operator:
+  ```
+  No Soloist session found. Pairing now — open the Spotify app and
+  select the device "<name>" from the device picker.
+  ```
+- `/healthz` returns `503 {"error":"soloist_unpaired"}` while the session is missing. Do not crash-loop.
+- Pairing lifecycle: `--pair` advertises a Connect device and keeps running until pairing completes, then stores the session and exits `0`. The shim waits for it and transitions to Phase 2c as soon as exit code `0` and `settings/Users` are observed. Non-zero exit (`1`) means pairing failed (e.g. invalid `$SOLOIST_API_KEY`) — log the reason and retry with exponential backoff. Exit `10` means the binary is expired — delete it (next startup re-downloads) and set state `expired`; do not retry pairing.
+- Only one Soloist instance runs at a time: pair mode during Phase 2b, Connect mode during Phase 2c.
+- Unit test: fake `ProcessManager` with pair exit `0` + session file present → state `ready`, no pair re-spawn. Pair exit `1` → retry scheduled with backoff. Missing session file → state `unpaired`; present session file → state `ready`.
 
 ### Verification
 
+Pairing requires device discovery on the LAN — the container must run with `--network host` (as the Makefile targets do).
+
 ```bash
 # run without a session directory
-podman run --rm -p 8080:8080 \
+podman run --rm -p 8080:8080 --network host \
   -e SOLOIST_API_KEY=test -e TEDDYCLOUD_URL=http://localhost \
+  -v ./container/soloist-data:/data:Z \
   shim:dev
 curl -s http://localhost:8080/healthz   # → 503 {"error":"soloist_unpaired"}
-# shim log: clear pairing instruction
+# shim log: "Pairing now — open the Spotify app and select the device <name>"
 
-# after pairing, restart — healthz should return 200
+# in the Spotify app: pick the advertised device from the device picker
+curl -s http://localhost:8080/healthz   # → 200 OK (transition is automatic, no restart)
+# shim log: "soloist paired, session stored"
 ```
 
 ---
@@ -127,6 +138,8 @@ curl -s http://localhost:8080/healthz   # → 503 {"error":"soloist_unpaired"}
 ## Phase 2c — Soloist subprocess lifecycle + WebSocket
 
 **Goal:** the shim spawns Soloist in Connect mode, holds an open WebSocket, and handles all exit conditions.
+
+> Start only after the Phase 2b pairing gate has a stored session. Connect-mode spawning below owns the runtime subprocess; the pair-mode subprocess of Phase 2b is a different, one-time invocation.
 
 ### Tasks
 

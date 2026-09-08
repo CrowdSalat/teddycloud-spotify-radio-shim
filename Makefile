@@ -1,7 +1,7 @@
 # Makefile
 
 IMAGE    ?= teddycloud-spotify-shim
-DATA_DIR ?= $(CURDIR)/container/data
+DATA_DIR ?= $(CURDIR)/container/soloist-data/
 ENV_FILE ?= $(CURDIR)/container/.env
 
 # Run flags shared across container targets.
