@@ -71,65 +71,10 @@ func newTestListener(serverURL string, f *fakeSender) *Listener {
 	}
 }
 
-// TestListener_EventMapping feeds one event per supported name and checks the
-// translated commands together with the extracted URI.
-func TestListener_EventMapping(t *testing.T) {
+// TestListener_TagValidPlay checks that TagValid triggers Play with empty URI.
+func TestListener_TagValidPlay(t *testing.T) {
 	const events = "" +
-		"event: figurine-placed\ndata: {\"type\":\"figurine-placed\",\"data\":\"spotify:album:X\"}\n\n" +
-		"event: figurine-lifted\ndata: {\"type\":\"figurine-lifted\",\"data\":\"\"}\n\n" +
-		"event: right-ear-slap\ndata: {\"type\":\"right-ear-slap\",\"data\":\"\"}\n\n" +
-		"event: left-ear-slap\ndata: {\"type\":\"left-ear-slap\",\"data\":\"\"}\n\n" +
-		"event: TagValid\ndata: {\"type\":\"TagValid\",\"data\":\"0123456789ABCDEF\"}\n\n" +
-		"event: TagInvalid\ndata: {\"type\":\"TagInvalid\",\"data\":\"-0123456789ABCDEF\"}\n\n" +
-		"event: pressed\ndata: {\"type\":\"pressed\",\"data\":\"ear-big\"}\n\n" +
-		"event: pressed\ndata: {\"type\":\"pressed\",\"data\":\"ear-small\"}\n\n"
-
-	srv := sseServer(events)
-	defer srv.Close()
-
-	f := &fakeSender{}
-	l := newTestListener(srv.URL, f)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		l.Run(ctx)
-	}()
-
-	want := []string{
-		"play:spotify:album:X",
-		"pause",
-		"skip_next",
-		"skip_prev",
-		"play:", // TagValid payload is a UID, no URI; Play gets ""
-		"pause", // TagInvalid maps to pause
-		"skip_next",
-		"skip_prev",
-	}
-
-	got := waitReceipts(t, f, len(want))
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("receipt[%d]: got %q, want %q (all: %v)", i, got[i], want[i], got)
-		}
-	}
-
-	cancel()
-	waitStopped(t, done)
-}
-
-// TestListener_IgnoresKeepAliveCommentsAndUnknown checks that transport noise
-// and unmapped events produce no commands.
-func TestListener_IgnoresKeepAliveCommentsAndUnknown(t *testing.T) {
-	const events = "" +
-		"event: keep-alive\ndata: {\"type\":\"keep-alive\",\"data\":\"\"}\n\n" +
-		": a comment line\n\n" +
-		"event: ContentTitle\ndata: {\"type\":\"ContentTitle\",\"data\":\"Benjamin\"}\n\n" +
-		"event: ContentAudioId\ndata: {\"type\":\"ContentAudioId\",\"data\":\"42\"}\n\n" +
-		"data: {\"type\":\"no-event-name\",\"data\":\"\"}\n\n" +
-		"garbage line without a field\n\n" +
-		"event: figurine-placed\ndata: {\"type\":\"figurine-placed\",\"data\":\"spotify:album:Y\"}\n\n"
+		"event: TagValid\ndata: { \"type\":\"TagValid\", \"data\":\"E00403500EEA4BF2\" }\n\n"
 
 	srv := sseServer(events)
 	defer srv.Close()
@@ -145,12 +90,224 @@ func TestListener_IgnoresKeepAliveCommentsAndUnknown(t *testing.T) {
 	}()
 
 	got := waitReceipts(t, f, 1)
-	if got[0] != "play:spotify:album:Y" {
-		t.Fatalf("receipt: got %q, want play for figurine-placed only", got[0])
+	if got[0] != "play:" {
+		t.Fatalf("receipt: got %q, want play: (empty URI from TagValid)", got[0])
 	}
 
 	cancel()
 	waitStopped(t, done)
+}
+
+// TestListener_PlaybackStoppedPause checks that playback stopped triggers Pause.
+func TestListener_PlaybackStoppedPause(t *testing.T) {
+	const events = "" +
+		"event: playback\ndata: { \"type\":\"playback\", \"data\":\"stopped\" }\n\n"
+
+	srv := sseServer(events)
+	defer srv.Close()
+
+	f := &fakeSender{}
+	l := newTestListener(srv.URL, f)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		l.Run(ctx)
+	}()
+
+	got := waitReceipts(t, f, 1)
+	if got[0] != "pause" {
+		t.Fatalf("receipt: got %q, want pause", got[0])
+	}
+
+	cancel()
+	waitStopped(t, done)
+}
+
+// TestListener_PlaybackStartingStartedIgnored checks that playback
+// starting/started produce no commands.
+func TestListener_PlaybackStartingStartedIgnored(t *testing.T) {
+	const events = "" +
+		"event: playback\ndata: { \"type\":\"playback\", \"data\":\"starting\" }\n\n" +
+		"event: playback\ndata: { \"type\":\"playback\", \"data\":\"started\" }\n\n"
+
+	srv := sseServer(events)
+	defer srv.Close()
+
+	f := &fakeSender{}
+	l := newTestListener(srv.URL, f)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		l.Run(ctx)
+	}()
+
+	// Wait briefly to confirm no commands arrive.
+	select {
+	case <-ctx.Done():
+	case <-time.After(200 * time.Millisecond):
+	}
+	cancel()
+	waitStopped(t, done)
+
+	if calls := f.snapshot(); len(calls) != 0 {
+		t.Fatalf("expected no commands, got %v", calls)
+	}
+}
+
+// TestListener_PressedEarBigSkipNext checks that pressed ear-big triggers
+// SkipNext.
+func TestListener_PressedEarBigSkipNext(t *testing.T) {
+	const events = "" +
+		"event: pressed\ndata: { \"type\":\"pressed\", \"data\":\"ear-big\" }\n\n"
+
+	srv := sseServer(events)
+	defer srv.Close()
+
+	f := &fakeSender{}
+	l := newTestListener(srv.URL, f)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		l.Run(ctx)
+	}()
+
+	got := waitReceipts(t, f, 1)
+	if got[0] != "skip_next" {
+		t.Fatalf("receipt: got %q, want skip_next", got[0])
+	}
+
+	cancel()
+	waitStopped(t, done)
+}
+
+// TestListener_PressedEarSmallSkipPrev checks that pressed ear-small triggers
+// SkipPrev.
+func TestListener_PressedEarSmallSkipPrev(t *testing.T) {
+	const events = "" +
+		"event: pressed\ndata: { \"type\":\"pressed\", \"data\":\"ear-small\" }\n\n"
+
+	srv := sseServer(events)
+	defer srv.Close()
+
+	f := &fakeSender{}
+	l := newTestListener(srv.URL, f)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		l.Run(ctx)
+	}()
+
+	got := waitReceipts(t, f, 1)
+	if got[0] != "skip_prev" {
+		t.Fatalf("receipt: got %q, want skip_prev", got[0])
+	}
+
+	cancel()
+	waitStopped(t, done)
+}
+
+// TestListener_PressedEarSmallDoubleIgnored checks that pressed ear-small-double
+// produces no command.
+func TestListener_PressedEarSmallDoubleIgnored(t *testing.T) {
+	const events = "" +
+		"event: pressed\ndata: { \"type\":\"pressed\", \"data\":\"ear-small-double\" }\n\n"
+
+	srv := sseServer(events)
+	defer srv.Close()
+
+	f := &fakeSender{}
+	l := newTestListener(srv.URL, f)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		l.Run(ctx)
+	}()
+
+	select {
+	case <-ctx.Done():
+	case <-time.After(200 * time.Millisecond):
+	}
+	cancel()
+	waitStopped(t, done)
+
+	if calls := f.snapshot(); len(calls) != 0 {
+		t.Fatalf("expected no commands, got %v", calls)
+	}
+}
+
+// TestListener_IgnoresKnockVolumeAndKeepAlive checks that transport noise and
+// unmapped events produce no commands.
+func TestListener_IgnoresKnockVolumeAndKeepAlive(t *testing.T) {
+	const events = "" +
+		"event: keep-alive\ndata: { \"type\":\"keep-alive\", \"data\":\"\" }\n\n" +
+		"event: VolumeLevel\ndata: { \"type\":\"VolumeLevel\", \"data\":\"12\" }\n\n" +
+		"event: VolumedB\ndata: { \"type\":\"VolumedB\", \"data\":\"-3\" }\n\n" +
+		"event: knock\ndata: { \"type\":\"knock\", \"data\":\"forward\" }\n\n" +
+		"event: ContentAudioId\ndata: { \"type\":\"ContentAudioId\", \"data\":\"436906887\" }\n\n" +
+		"event: ContentTitle\ndata: { \"type\":\"ContentTitle\", \"data\":\"Unknown\" }\n\n" +
+		": a comment line\n\n" +
+		"garbage line without a field\n\n" +
+		"event: TagValid\ndata: { \"type\":\"TagValid\", \"data\":\"E00403500EEA4BF2\" }\n\n"
+
+	srv := sseServer(events)
+	defer srv.Close()
+
+	f := &fakeSender{}
+	l := newTestListener(srv.URL, f)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		l.Run(ctx)
+	}()
+
+	// Only the TagValid at the end should produce a command.
+	got := waitReceipts(t, f, 1)
+	if got[0] != "play:" {
+		t.Fatalf("receipt: got %q, want play:", got[0])
+	}
+
+	cancel()
+	waitStopped(t, done)
+}
+
+// TestListener_UnknownPressedIsIgnored checks that a pressed event with an
+// unmapped payload is dropped rather than mapped arbitrarily.
+func TestListener_UnknownPressedIsIgnored(t *testing.T) {
+	srv := sseServer("event: pressed\ndata: { \"type\":\"pressed\", \"data\":\"ear-something-else\" }\n\n")
+	defer srv.Close()
+
+	f := &fakeSender{}
+	l := newTestListener(srv.URL, f)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		l.Run(ctx)
+	}()
+
+	select {
+	case <-ctx.Done():
+	case <-time.After(150 * time.Millisecond):
+	}
+	cancel()
+	waitStopped(t, done)
+
+	if calls := f.snapshot(); len(calls) != 0 {
+		t.Fatalf("expected no commands, got %v", calls)
+	}
 }
 
 // TestListener_CtxCancel checks that Run exits promptly when ctx is cancelled
@@ -195,13 +352,13 @@ func TestListener_Reconnects(t *testing.T) {
 		if first {
 			// First connection: one event, then the handler returns, which
 			// closes the connection and forces a reconnect.
-			_, _ = fmt.Fprint(w, "event: figurine-placed\ndata: {\"type\":\"figurine-placed\",\"data\":\"spotify:album:A\"}\n\n")
+			_, _ = fmt.Fprint(w, "event: TagValid\ndata: {\"type\":\"TagValid\",\"data\":\"UID_A\"}\n\n")
 			return
 		}
 
 		// Second connection: deliver the next event, then keep it open until
 		// the request context is cancelled.
-		_, _ = fmt.Fprint(w, "event: figurine-placed\ndata: {\"type\":\"figurine-placed\",\"data\":\"spotify:album:B\"}\n\n")
+		_, _ = fmt.Fprint(w, "event: TagValid\ndata: {\"type\":\"TagValid\",\"data\":\"UID_B\"}\n\n")
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
@@ -219,7 +376,7 @@ func TestListener_Reconnects(t *testing.T) {
 		l.Run(ctx)
 	}()
 
-	want := []string{"play:spotify:album:A", "play:spotify:album:B"}
+	want := []string{"play:", "play:"}
 	got := waitReceipts(t, f, len(want))
 	for i := range want {
 		if got[i] != want[i] {
@@ -231,57 +388,30 @@ func TestListener_Reconnects(t *testing.T) {
 	waitStopped(t, done)
 }
 
-// TestListener_PlayBareURIData accepts a payload consisting of a bare
-// spotify: URI (not wrapped in the {"data":...} envelope).
-func TestListener_PlayBareURIData(t *testing.T) {
-	srv := sseServer("event: figurine-placed\ndata: spotify:album:RAW\n\n")
-	defer srv.Close()
-
-	f := &fakeSender{}
-	l := newTestListener(srv.URL, f)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		l.Run(ctx)
-	}()
-
-	got := waitReceipts(t, f, 1)
-	if got[0] != "play:spotify:album:RAW" {
-		t.Fatalf("receipt: got %q, want bare-URI play", got[0])
+// TestSseURL ensures the /api/sse suffix is appended, tolerating a trailing
+// slash on the base URL.
+func TestSseURL(t *testing.T) {
+	l := newTestListener("http://example.com/", &fakeSender{})
+	if got := l.sseURL(); got != "http://example.com/api/sse" {
+		t.Fatalf("sseURL: got %q", got)
 	}
-
-	cancel()
-	waitStopped(t, done)
 }
 
-// TestListener_UnknownPressedIsIgnored checks that a pressed event with an
-// unmapped payload is dropped rather than mapped arbitrarily.
-func TestListener_UnknownPressedIsIgnored(t *testing.T) {
-	srv := sseServer("event: pressed\ndata: {\"type\":\"pressed\",\"data\":\"ear-something-else\"}\n\n")
-	defer srv.Close()
-
-	f := &fakeSender{}
-	l := newTestListener(srv.URL, f)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		l.Run(ctx)
-	}()
-
-	// No other events arrive; if the loop is alive, no commands must be sent.
-	select {
-	case <-ctx.Done():
-	case <-time.After(150 * time.Millisecond):
+// TestWrappedValue covers the envelope format used by real Teddycloud.
+func TestWrappedValue(t *testing.T) {
+	table := []struct{ in, want string }{
+		{`{"type":"pressed","data":"ear-big"}`, "ear-big"},
+		{`{"type":"TagValid","data":"E00403500EEA4BF2"}`, "E00403500EEA4BF2"},
+		{`{"type":"playback","data":"stopped"}`, "stopped"},
+		{`{"type":"playback","data":"starting"}`, "starting"},
+		{`{"type":"knock","data":"forward"}`, "forward"},
+		{"spotify:album:RAW", "spotify:album:RAW"},
+		{"", ""},
 	}
-	cancel()
-	waitStopped(t, done)
-
-	if calls := f.snapshot(); len(calls) != 0 {
-		t.Fatalf("expected no commands, got %v", calls)
+	for _, tc := range table {
+		if got := wrappedValue(tc.in); got != tc.want {
+			t.Errorf("wrappedValue(%q): got %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }
 
@@ -293,45 +423,5 @@ func waitStopped(t *testing.T, done <-chan struct{}) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("Run did not stop")
-	}
-}
-
-// TestSseURL ensures the /api/sse suffix is appended, tolerating a trailing
-// slash on the base URL.
-func TestSseURL(t *testing.T) {
-	l := newTestListener("http://example.com/", &fakeSender{})
-	if got := l.sseURL(); got != "http://example.com/api/sse" {
-		t.Fatalf("sseURL: got %q", got)
-	}
-}
-
-// TestWrappedValue covers the envelope formats used by real Teddycloud and the
-// mock.
-func TestWrappedValue(t *testing.T) {
-	table := []struct{ in, want string }{
-		{`{"type":"pressed","data":"ear-big"}`, "ear-big"},
-		{`{"type":"figurine-placed","data":"spotify:album:X"}`, "spotify:album:X"},
-		{`{"type":"TagValid","data":"0123456789ABCDEF"}`, "0123456789ABCDEF"},
-		{"spotify:album:RAW", "spotify:album:RAW"},
-		{"", ""},
-	}
-	for _, tc := range table {
-		if got := wrappedValue(tc.in); got != tc.want {
-			t.Errorf("wrappedValue(%q): got %q, want %q", tc.in, got, tc.want)
-		}
-	}
-}
-
-// TestExtractURI checks the URI extraction rules.
-func TestExtractURI(t *testing.T) {
-	table := []struct{ in, want string }{
-		{`{"type":"figurine-placed","data":"spotify:album:X"}`, "spotify:album:X"},
-		{"spotify:album:RAW", "spotify:album:RAW"},
-		{`{"type":"TagValid","data":"0123456789ABCDEF"}`, ""},
-	}
-	for _, tc := range table {
-		if got := extractURI(tc.in); got != tc.want {
-			t.Errorf("extractURI(%q): got %q, want %q", tc.in, got, tc.want)
-		}
 	}
 }

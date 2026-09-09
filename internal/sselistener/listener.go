@@ -1,19 +1,20 @@
 // Package sselistener consumes Teddycloud SSE events and translates them into
 // Soloist WebSocket commands.
 //
-// Event-name mapping. Real Teddycloud (toniebox-reverse-engineering/teddycloud,
-// src/toniebox_state.c + src/handler_rtnl.c) emits "TagValid" (figurine placed)
-// / "TagInvalid" (figurine removed, tagged by a missing/dashed UID) and
-// "pressed" with payloads "ear-big"/"ear-small". The DESIGN.md names
-// ("figurine-placed", "figurine-lifted", "right-ear-slap", "left-ear-slap")
-// are accepted as well, so the mock and the real server both work without code
-// changes: TagValid→play, TagInvalid→pause, ear-big→skip_next (right ear),
-// ear-small→skip_prev (left ear, volume down side per MQTT_CONTROL.md).
+// Real Teddycloud event mapping (source: docs/research/teddycloud-sse-events.md):
 //
-// URIs. Real Teddycloud events carry no Spotify URI (the URI lives in the
-// figurine config), so Play receives "" for those. The mock embeds the URI in
-// the figurine-placed payload; extractURI pulls it from a JSON "uri" field or
-// from a bare spotify: data line.
+//   - TagValid carries the tonie NFC UID hex (e.g. "E00403500EEA4BF2") and
+//     signals a figurine was placed. The Spotify URI arrives separately via the
+//     /stream?spotify_uri= request, never through SSE → Play("").
+//   - playback "starting"/"started" is debug-ignored; "stopped" signals the
+//     figurine was lifted → Pause().
+//   - pressed "ear-big" → SkipNext(); "ear-small" → SkipPrev();
+//     "ear-small-double" and unknown values are debug-ignored.
+//   - There is no TagInvalid event on the real server.
+//   - VolumeLevel, VolumedB, ContentAudioId, ContentTitle, knock, keep-alive
+//     and all other events are irrelevant to the control path and debug-ignored.
+//
+// The wire format is: event:<name>\ndata: {"type":"<name>","data":"<value>"}\n\n
 package sselistener
 
 import (
@@ -162,7 +163,7 @@ func (l *Listener) consume(ctx context.Context, body io.Reader) error {
 }
 
 // readLoop parses SSE frames (event:/data: lines, blank line terminates).
-// Keep-alives, comments (":"), unknown events and malformed lines are skipped.
+// Keep-alives, comments (": "), unknown events and malformed lines are skipped.
 func (l *Listener) readLoop(ctx context.Context, body io.Reader) error {
 	s := bufio.NewScanner(body)
 	s.Buffer(nil, 64*1024) // tolerate generous data payloads
@@ -221,14 +222,23 @@ func (e *textError) Error() string { return e.msg }
 // dispatch routes a complete SSE event to the command sink.
 func (l *Listener) dispatch(eventName, data string) {
 	switch eventName {
-	case "figurine-placed", "TagValid":
-		uri := extractURI(data)
-		l.send("play", uri, func() error { return l.Commands.Play(uri) })
-	case "figurine-lifted", "TagInvalid":
-		l.send("pause", "", l.Commands.Pause)
+	case "TagValid":
+		// Real Teddycloud: TagValid carries the tonie NFC UID hex, not a
+		// Spotify URI. The URI arrives via /stream?spotify_uri=.
+		l.send("play", "", func() error { return l.Commands.Play("") })
+	case "playback":
+		switch wrappedValue(data) {
+		case "stopped":
+			l.send("pause", "", l.Commands.Pause)
+		case "starting", "started":
+			slog.Debug("sselistener: ignoring playback state", "value", wrappedValue(data))
+		default:
+			slog.Debug("sselistener: ignoring playback event", "data", data)
+		}
 	case "pressed":
-		// Real Teddycloud labels ear presses by placement: "ear-big" is the
-		// volume-up (forward/right) ear, "ear-small" the volume-down (left).
+		// Real Teddycloud labels ear presses by physical placement:
+		// "ear-big" is the volume-up (forward/right) ear,
+		// "ear-small" the volume-down (left) ear.
 		switch wrappedValue(data) {
 		case "ear-big":
 			l.send("skip_next", "", l.Commands.SkipNext)
@@ -237,13 +247,9 @@ func (l *Listener) dispatch(eventName, data string) {
 		default:
 			slog.Debug("sselistener: ignoring pressed event", "data", data)
 		}
-	case "right-ear-slap":
-		l.send("skip_next", "", l.Commands.SkipNext)
-	case "left-ear-slap":
-		l.send("skip_prev", "", l.Commands.SkipPrev)
 	default:
-		// keep-alive, ContentTitle, ContentAudioId, Knock, Tilt, ... are
-		// irrelevant transport noise for the control path.
+		// keep-alive, VolumeLevel, VolumedB, ContentTitle, ContentAudioId,
+		// knock, and all other events are irrelevant to the control path.
 		slog.Debug("sselistener: ignoring event", "event", eventName)
 	}
 }
@@ -263,27 +269,9 @@ func (l *Listener) send(command, uri string, fn func() error) {
 	}
 }
 
-// extractURI pulls a Spotify URI from an SSE data payload: a "uri" field in
-// embedded JSON, otherwise a bare spotify: data line.
-func extractURI(data string) string {
-	s := wrappedValue(data)
-
-	var inner struct {
-		URI string `json:"uri"`
-	}
-	if json.Unmarshal([]byte(s), &inner) == nil && strings.HasPrefix(inner.URI, "spotify:") {
-		return inner.URI
-	}
-
-	if strings.HasPrefix(s, "spotify:") {
-		return s
-	}
-
-	return ""
-}
-
 // wrappedValue unwraps the JSON object {"type":...,"data":<value>} real
-// Teddycloud emits, returning the value. Non-object data passes through.
+// Teddycloud emits, returning the inner string value. Non-object data passes
+// through unchanged.
 func wrappedValue(data string) string {
 	s := strings.TrimSpace(data)
 	if s == "" || !strings.HasPrefix(s, "{") {
