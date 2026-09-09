@@ -4,9 +4,11 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -20,6 +22,10 @@ import (
 const (
 	pairingBackoffInitial = 5 * time.Second
 	pairingBackoffMax     = 60 * time.Second
+
+	// monitorPollInterval is how often the recorder waits for the PulseAudio
+	// daemon to become ready and retries a failed monitor connect.
+	monitorPollInterval = 250 * time.Millisecond
 )
 
 func main() {
@@ -49,6 +55,11 @@ func main() {
 
 	defer pa.Stop()
 	go pa.Run(ctx)
+
+	// Phase 3b.2: live monitor recorder. It runs independently of the Soloist
+	// branch below: audio flows even while the Soloist session is missing or
+	// unpaired.
+	go runRecorder(ctx, pa)
 
 	// Phase 2a: resolve Soloist binary before starting anything else.
 	bm := &soloist.BinaryManager{
@@ -126,6 +137,65 @@ func runSupervisor(ctx context.Context, srv *server.Server, cfg *config.Config, 
 	}
 
 	supervisor.Run(ctx)
+}
+
+// runRecorder waits for the PulseAudio daemon to become ready, then keeps the
+// live virtual_out.monitor stream recording through PulseRecorder until ctx is
+// cancelled. It never blocks the Soloist pairing or supervisor branches.
+func runRecorder(ctx context.Context, pa *audio.PulseAudio) {
+	for !pa.Ready() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(monitorPollInterval):
+		}
+	}
+
+	stream, err := openMonitorStream(ctx)
+	if err != nil {
+		return
+	}
+	defer stream.Close()
+
+	rec := &audio.PulseRecorder{Source: stream}
+	defer rec.Stop()
+	rec.Start(ctx)
+
+	slog.Info("recorder started, reading from virtual_out.monitor")
+
+	<-ctx.Done()
+}
+
+// openMonitorStream opens the live monitor stream, retrying until one is
+// established or ctx is cancelled.
+func openMonitorStream(ctx context.Context) (io.ReadCloser, error) {
+	server := pulseServerSocket()
+
+	for {
+		stream, err := audio.OpenMonitorStream(ctx, server)
+		if err == nil {
+			return stream, nil
+		}
+
+		slog.Warn("recorder: monitor open failed", "err", err)
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(monitorPollInterval):
+		}
+	}
+}
+
+// pulseServerSocket is the native socket this shim's PulseAudio daemon listens
+// on, as a server string the pulse client library accepts.
+func pulseServerSocket() string {
+	runtime := os.Getenv("XDG_RUNTIME_DIR")
+	if runtime == "" {
+		runtime = "/tmp/runtime"
+	}
+
+	return "unix:" + filepath.Join(runtime, "pulse", "native")
 }
 
 func setupLogger(level string) {

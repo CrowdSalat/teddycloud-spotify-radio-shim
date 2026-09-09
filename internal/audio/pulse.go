@@ -102,7 +102,11 @@ func (p *PulseAudio) SetupEnv() error {
 		return err
 	}
 
-	return os.Setenv("XDG_RUNTIME_DIR", runtime)
+	if err := os.Setenv("XDG_RUNTIME_DIR", runtime); err != nil {
+		return err
+	}
+
+	return os.Setenv("PULSE_SERVER", "unix:"+filepath.Join(runtime, "pulse", "native"))
 }
 
 // Start brings the daemon up and verifies the sink. It returns an error when
@@ -413,7 +417,7 @@ func (p *PulseAudio) daemonArgs() []string {
 		"--exit-idle-time=-1",
 		"-n",
 		"--load=module-native-protocol-unix",
-		fmt.Sprintf("--load=module-null-sink sink_name=%s sink_properties=device.description=%s", SinkName, sinkDeviceDesc),
+		fmt.Sprintf("--load=module-null-sink sink_name=%s rate=44100 channels=2 sink_properties=device.description=%s", SinkName, sinkDeviceDesc),
 		"--daemonize=yes",
 		"--log-target=stderr",
 	}
