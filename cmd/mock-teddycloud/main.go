@@ -1,8 +1,9 @@
 // Command mock-teddycloud is a minimal Teddycloud SSE mock for local testing.
+// Event formats match the real Teddycloud byte-for-byte; see
+// docs/research/teddycloud-sse-events.md.
 package main
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -12,14 +13,14 @@ import (
 )
 
 const (
-	keepAliveInterval = 15 * time.Second
+	keepAliveInterval = 16 * time.Second
 	eventPath         = "/api/event"
 	ssePath           = "/api/sse"
 )
 
 var (
 	addrFlag = flag.String("addr", ":9090", "HTTP listen address")
-	uriFlag  = flag.String("uri", "", "Spotify URI for figurine-placed events")
+	uidFlag  = flag.String("tonie-uid", "E00403500EEA4BF2", "tonie NFC UID hex for figurine-placed events")
 )
 
 // event represents an SSE event dispatched to subscribers.
@@ -32,13 +33,13 @@ type event struct {
 type hub struct {
 	mu      sync.Mutex
 	clients map[chan event]struct{}
-	uri     string
+	uid     string
 }
 
-func newHub(uri string) *hub {
+func newHub(uid string) *hub {
 	return &hub{
 		clients: make(map[chan event]struct{}),
-		uri:     uri,
+		uid:     uid,
 	}
 }
 
@@ -65,32 +66,46 @@ func (h *hub) broadcast(evt event) {
 	h.mu.Unlock()
 }
 
-// trigger fires an event, correlating button actions to SSE event names.
-// The figurine-placed event includes the configured URI.
+// sseFrame builds a byte-for-byte identical SSE frame.
+func sseFrame(name, value string) string {
+	return "event: " + name + "\ndata: { \"type\":\"" + name + "\", \"data\":\"" + value + "\" }\n\n"
+}
+
+// trigger fires SSE events matching the real Teddycloud sequences.
 func (h *hub) trigger(action string) {
 	slog.Info("mock-teddycloud: trigger", "action", action)
 
 	switch action {
 	case "figurine-placed":
-		h.broadcast(event{Name: "figurine-placed", Data: jsonStr(h.uri)})
+		h.broadcast(event{Name: "TagValid", Data: h.uid})
+		h.broadcast(event{Name: "playback", Data: "starting"})
+		h.broadcast(event{Name: "playback", Data: "started"})
+		h.broadcast(event{Name: "ContentAudioId", Data: "436906887"})
+		h.broadcast(event{Name: "ContentTitle", Data: "Unknown"})
 	case "figurine-lifted":
-		h.broadcast(event{Name: "figurine-lifted", Data: jsonStr("")})
+		h.broadcast(event{Name: "playback", Data: "stopped"})
 	case "right-ear-slap":
-		h.broadcast(event{Name: "right-ear-slap", Data: jsonStr("")})
+		h.broadcast(event{Name: "VolumeLevel", Data: "12"})
+		h.broadcast(event{Name: "VolumedB", Data: "-3"})
+		h.broadcast(event{Name: "pressed", Data: "ear-big"})
 	case "left-ear-slap":
-		h.broadcast(event{Name: "left-ear-slap", Data: jsonStr("")})
+		h.broadcast(event{Name: "VolumeLevel", Data: "10"})
+		h.broadcast(event{Name: "VolumedB", Data: "-9"})
+		h.broadcast(event{Name: "pressed", Data: "ear-small"})
+	case "ear-small-double":
+		h.broadcast(event{Name: "VolumeLevel", Data: "9"})
+		h.broadcast(event{Name: "VolumedB", Data: "-12"})
+		h.broadcast(event{Name: "pressed", Data: "ear-small-double"})
+	case "knock-forward":
+		h.broadcast(event{Name: "knock", Data: "forward"})
+	case "knock-backward":
+		h.broadcast(event{Name: "knock", Data: "backward"})
 	default:
 		slog.Warn("mock-teddycloud: unknown action", "action", action)
 	}
 }
 
-// jsonStr wraps s in a JSON string (quoted, escaped).
-func jsonStr(s string) string {
-	b, _ := json.Marshal(s)
-	return string(b)
-}
-
-// handleIndex serves the control page with four buttons.
+// handleIndex serves the control page with buttons.
 func handleIndex(h *hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
@@ -144,11 +159,10 @@ func handleSSE(h *hub) http.HandlerFunc {
 			case <-ctx.Done():
 				return
 			case <-keepAlive.C:
-				_, _ = fmt.Fprintf(w, "event: keep-alive\ndata: {\"type\":\"keep-alive\",\"data\":\"\"}\n\n")
+				_, _ = fmt.Fprint(w, sseFrame("keep-alive", ""))
 				flusher.Flush()
 			case evt := <-ch:
-				_, _ = fmt.Fprintf(w, "event: %s\ndata: {\"type\":\"%s\",\"data\":%s}\n\n",
-					evt.Name, evt.Name, evt.Data)
+				_, _ = fmt.Fprint(w, sseFrame(evt.Name, evt.Data))
 				flusher.Flush()
 			}
 		}
@@ -158,14 +172,14 @@ func handleSSE(h *hub) http.HandlerFunc {
 func main() {
 	flag.Parse()
 
-	hub := newHub(*uriFlag)
+	hub := newHub(*uidFlag)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", handleIndex(hub))
 	mux.HandleFunc(eventPath, handleEvent(hub))
 	mux.HandleFunc(ssePath, handleSSE(hub))
 
-	slog.Info("mock-teddycloud: listening", "addr", *addrFlag, "uri", *uriFlag)
+	slog.Info("mock-teddycloud: listening", "addr", *addrFlag, "tonie-uid", *uidFlag)
 
 	if err := http.ListenAndServe(*addrFlag, mux); err != nil {
 		slog.Error("mock-teddycloud: server error", "err", err)
