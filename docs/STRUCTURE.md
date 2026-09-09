@@ -28,7 +28,7 @@ To keep the orchestration logic unit-testable, subprocess spawning is hidden beh
 - Package layout:
   ```
   cmd/shim/            main entry point — wires concrete types to interfaces
-  cmd/mock-teddycloud/ mock SSE server (stubbed, implemented in Phase 6)
+  cmd/mock-teddycloud/ mock SSE server (stubbed, implemented in Phase 5)
   internal/config/     env-var config loader
   internal/process/    ProcessManager interface + exec implementation
   internal/audio/      AudioDaemon + ChunkSource interfaces; PulseAudio implementation
@@ -371,9 +371,47 @@ curl "http://localhost:8080/stream?spotify_uri=spotify:album:<id>" | ffplay -f w
 
 ---
 
-## Phase 6 — Hot-swap
+## Phase 6 — Integration with real Teddycloud
 
-**Goal:** swapping figurines replaces the active stream with no shim restart.
+**Goal:** validate the SSE event format and the control mapping against the real Teddycloud and a real Toniebox, and **fix `cmd/mock-teddycloud` so the mock matches reality**. This is the point where assumed event formats get verified — the mock becomes trustworthy for the phases that follow.
+
+Do not expect `internal/sselistener` to need logic changes — that is the point of this phase's verification. If it does, the mock was built on an assumption, and is corrected here so Phase 7's development does not repeat the mismatch.
+
+### Tasks
+
+- Reach the real Teddycloud without the auth proxy:
+  - The OAuth proxy is a **sidecar** on port `4180` (Route only). Service port `80` targets the teddycloud container directly.
+  - Local shim: `oc port-forward svc/teddycloud 8080:80 -n app-teddycloud` → `TEDDYCLOUD_URL=http://localhost:8080`. No OpenShift login needed.
+- Verify SSE event format matches what the listener expects. If parsing needs adjustment, change `internal/sselistener` accordingly.
+- **Fix the mock:** update `cmd/mock-teddycloud` so its SSE event payloads match the real server **byte-for-byte** — `figurine-placed` (incl. URI), `figurine-lifted`, `right-ear-slap`, `left-ear-slap`. The mock stays the standing dev harness for Phase 7.
+- Configure a figurine in Teddycloud: stream URL = `http://<shim>:8080/stream?spotify_uri=<URI>`.
+- Test the physical controls that do not depend on hot-swap: place → play, lift → pause, right ear → skip_next, left ear → skip_prev.
+- Figurine **swap** is deferred — it exercises the hot-swap logic of Phase 7 and is re-verified in the Phase 11 final acceptance.
+
+### Verification
+
+```bash
+# SSE reachable without auth via port-forward (oauth-proxy sidecar bypassed)
+oc port-forward svc/teddycloud 8080:80 -n app-teddycloud
+curl -s http://localhost:8080/api/sse   # → heartbeats; capture event payloads on box action
+
+# mock now matches the real server
+diff <(curl -s http://localhost:8080/api/sse) \
+     <(go run ./cmd/mock-teddycloud --uri spotify:album:<id>)
+# → no output
+```
+
+- Place figurine → Spotify audio plays on a real Toniebox.
+- Lift figurine → audio pauses.
+- Right ear → next track.
+- Left ear → previous track.
+- `/healthz` returns `200` throughout.
+
+---
+
+## Phase 7 — Hot-swap
+
+**Goal:** swapping figurines replaces the active stream with no shim restart. Developed and verified against the Phase 6-validated mock — no Toniebox required.
 
 ### Tasks
 
@@ -394,30 +432,7 @@ curl "http://localhost:8080/stream?spotify_uri=spotify:album:<B>" | ffplay -f wa
 # album A curl terminates, album B plays — no shim restart
 ```
 
----
-
-## Phase 7 — Integration with real Teddycloud
-
-**Goal:** end-to-end test with actual hardware.
-
-Only start this phase once Phase 5 (mock-teddycloud baseline) passes completely.
-
-### Tasks
-
-- Point `TEDDYCLOUD_URL` at the real Teddycloud instance.
-- Verify SSE event format matches what the listener expects. Adjust parsing if needed (no logic change expected — mock was built to match).
-- Configure a figurine in Teddycloud: stream URL = `http://<shim>:8080/stream?spotify_uri=<URI>`.
-- Test all four physical controls on a real Toniebox.
-- Test figurine swap.
-
-### Verification
-
-- Place figurine → Spotify audio plays on Toniebox.
-- Lift figurine → audio pauses.
-- Right ear → next track.
-- Left ear → previous track.
-- Swap figurine → old stream stops, new album starts.
-- `/healthz` returns `200` throughout.
+Figurine swap on real hardware is re-verified in the Phase 11 final acceptance.
 
 ---
 
@@ -636,6 +651,7 @@ oc exec my-shim-pod -- ls /data/settings/Users/
   - `service.yaml` — `ClusterIP` Service exposing `LISTEN_ADDR` (default `:8080`).
   - `kustomization.yaml` — resources list + `generate` the Secret `stringData` placeholder (or document `oc create secret generic soloist-api-key`).
 - `Makefile`: `deploy-ocp` target — `oc apply -k container/ocp/`.
+- **Final acceptance:** re-run the Phase 6 hardware tests against the OCP deployment — all four physical controls **plus figurine swap** (hot-swap, Phase 7). The swap depends on the OCP pod's `/stream` handling and on Teddycloud reaching the shim's Service (use the Service DNS or expose a Route to the shim for this test).
 
 ### Verification
 
@@ -655,6 +671,15 @@ oc logs deployment/teddycloud-spotify-shim | grep -i soloist
 curl -s http://<route-or-svc>:8080/healthz   # → 200 OK
 ```
 
+Final acceptance on the deployed pod:
+
+- Place figurine → Spotify audio plays on Toniebox.
+- Lift figurine → audio pauses.
+- Right ear → next track.
+- Left ear → previous track.
+- Swap figurine → old stream stops, new album starts (hot-swap over the SDN, `TEDDYCLOUD_URL=http://teddycloud:80`).
+- `/healthz` returns `200` throughout.
+
 ---
 
 ## Dependency graph
@@ -668,13 +693,14 @@ Phase 1  (skeleton + Containerfile)
                             └── Phase 3b (recorder: core logic → live PulseAudio → resilience)
                                   └── Phase 4  (/stream endpoint)
                                       └── Phase 5  (mock-teddycloud + SSE listener)  ← integration gate
-                                            └── Phase 6  (hot-swap)
-                                                  └── Phase 7  (real Teddycloud)
+                                            └── Phase 6  (real Teddycloud — validate & fix mock)
+                                                  └── Phase 7  (hot-swap, against validated mock)
                                                         └── Phase 8  (polish)
                                                               └── Phase 9  (GHCR private image)
 
 Phase 10 (session migration script) — independent, can run any time after Phase 2b has a paired session.
 Phase 11 (OpenShift manifests) — needs Phase 9 image + Phase 10 migration script.
+                                    └── final acceptance: Phase 6 hardware tests + Phase 7 figurine swap on the deployed pod
 
 cmd/mock-teddycloud scaffolding can be started any time after Phase 1.
 ```
