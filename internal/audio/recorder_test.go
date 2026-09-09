@@ -245,6 +245,23 @@ func TestPulseRecorderChunksAlwaysFixedSize(t *testing.T) {
 	}
 }
 
+// TestPulseRecorderDone verifies that Done returns a nil channel before Start
+// and a closed channel shortly after the pump exits (here via immediate EOF).
+func TestPulseRecorderDone(t *testing.T) {
+	r := &PulseRecorder{Source: sourceFunc(func([]byte) (int, error) {
+		return 0, io.EOF
+	}), ChunkSize: 16, BufferLen: 1}
+
+	if got := r.Done(); got != nil {
+		t.Fatalf("Done() before Start = %v, want nil", got)
+	}
+
+	r.Start(context.Background())
+	defer r.Stop()
+
+	waitDone(t, r.Done(), time.Second)
+}
+
 func TestPulseRecorderStopTerminatesPump(t *testing.T) {
 	block := make(chan struct{})
 

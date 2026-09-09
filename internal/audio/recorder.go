@@ -20,7 +20,8 @@ type ChunkSource interface {
 
 // PulseRecorder reads PCM data from Source and emits fixed-size chunks on a
 // buffered channel. The pump goroutine is started via Start and terminated via
-// Stop or context cancellation.
+// Stop, context cancellation, or a Source read error. Done observes when the
+// pump has exited so callers can detect a dead stream and reconnect.
 type PulseRecorder struct {
 	// Source is the PCM producer (s16le, 44100 Hz, stereo; 4 bytes/frame).
 	// Zero value is nil and causes a panic if Start is called without one.
@@ -106,6 +107,15 @@ func (p *PulseRecorder) ChunksSent() uint64 {
 // Dropped returns the number of chunks dropped due to a full channel.
 func (p *PulseRecorder) Dropped() uint64 {
 	return p.dropped.Load()
+}
+
+// Done blocks until the pump goroutine has exited. Before Start it returns a
+// nil channel.
+func (p *PulseRecorder) Done() <-chan struct{} {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return p.done
 }
 
 func (p *PulseRecorder) pump(chunkCh chan []byte, ctx context.Context) {
