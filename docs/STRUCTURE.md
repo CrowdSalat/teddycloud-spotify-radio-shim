@@ -214,10 +214,12 @@ Inside the container:
 podman run --rm -p 8080:8080 \
   -e SOLOIST_API_KEY=test -e TEDDYCLOUD_URL=http://localhost \
   shim:dev
-# shim log: "PulseAudio ready"
+# shim log: "pulseaudio: ready"
 curl -s http://localhost:8080/healthz   # → 200 OK
-podman exec <ctr> pactl info                    # → Default Sink: virtual_out
-podman exec <ctr> pactl list sinks short        # → virtual_out present
+# podman exec does not inherit the shim's os.Setenv values — prefix the
+# pactl calls with XDG_RUNTIME_DIR=/tmp/runtime.
+podman exec <ctr> sh -c 'XDG_RUNTIME_DIR=/tmp/runtime pactl info'    # → Default Sink: virtual_out
+podman exec <ctr> sh -c 'XDG_RUNTIME_DIR=/tmp/runtime pactl list sinks short'  # → virtual_out present
 
 # crash recovery: kill PulseAudio, shim should notice and restart it
 podman exec <ctr> sh -c 'kill -9 $(cat /tmp/runtime/pulse/pid)'
@@ -225,7 +227,7 @@ sleep 3
 curl -s http://localhost:8080/healthz           # → 503 {"error":"pulseaudio_not_ready"} (while restarting)
 sleep 5
 curl -s http://localhost:8080/healthz           # → 200 OK (recovered)
-podman exec <ctr> pactl list sinks short        # → virtual_out present again
+podman exec <ctr> sh -c 'XDG_RUNTIME_DIR=/tmp/runtime pactl list sinks short'  # → virtual_out present again
 # shim log: "pulseaudio: daemon not reachable, restarting (attempt N)"
 ```
 
@@ -235,16 +237,37 @@ podman exec <ctr> pactl list sinks short        # → virtual_out present again
 
 **Goal:** the shim reads PCM bytes from `virtual_out.monitor`. Silence is fine — no Soloist playing yet.
 
-### Tasks
+Split into three independently verifiable tasks:
+
+### 3b.1 — Core recorder logic
 
 - Implement `ChunkSource` with a `PulseRecorder` concrete type using `github.com/jfreymuth/pulse` (pure Go, no cgo).
   - Format: `s16le`, 44100 Hz, stereo. Record from `virtual_out.monitor`.
   - `Chunks()` returns a buffered `chan []byte`.
-  - **Backpressure safety valve:** discard chunks when channel is full — prevents PulseAudio client buffer from stalling.
-  - Runs continuously, independent of any HTTP client.
-- Unit test: fake chunk reader → chunks arrive via `Chunks()`, full-channel discard does not block.
+  - **Backpressure safety valve:** discard chunks when channel is full. Must be a **non-blocking drop** (`select { default: }`) on the pulse library's connection goroutine — a blocking send fills the native-protocol socket queues and stalls the whole connection, commands included. Copy the inbound slice (the library writer may reuse its buffer).
+  - Coalesce into frame-aligned fixed-size chunks (4 bytes/frame for s16le stereo).
+  - Runs continuously, independent of any HTTP client and of Soloist availability.
+  - `Stop()` shuts the pump down; the pump goroutine selects on context cancellation.
+- Unit tests (no daemon needed — inject a fake producer):
+  - Fake producer feeds frames → chunks arrive via `Chunks()`.
+  - Full-channel discard does not block and does not stall the producer.
+  - Coalescing produces fixed, frame-aligned chunk sizes.
+  - `Stop()` terminates the pump.
 
-> **Fallback note:** if `github.com/jfreymuth/pulse` proves insufficient, implement `FFmpegRecorder` — runs `ffmpeg -f pulse -i virtual_out.monitor -f s16le -ar 44100 -ac 2 pipe:1` via `StdoutPipe()`. Satisfies `ChunkSource`. Swap in `cmd/shim/main.go`. Nothing else changes.
+### 3b.2 — Live PulseAudio integration
+
+- Wire the recorder into `cmd/shim/main.go`, gated on PulseAudio readiness (retry until `pa.Ready()`, bounded). Independent of the Soloist branch — a missing/unpaired Soloist must not stop PCM from flowing.
+- Set `PULSE_SERVER=unix:<XDG_RUNTIME_DIR>/pulse/native` in `SetupEnv()` so the library, `pactl`, and Soloist all resolve the same socket.
+- Pin the null sink sample spec (`rate=44100 channels=2` in `daemonArgs`) so the recorder format matches the sink exactly instead of relying on client-side resampling.
+- Verify lib API names against the real package (the research-doc `SinkByID` snippet is suspect — likely `SinkList` + name lookup).
+
+> **Fallback note:** if `github.com/jfreymuth/pulse` proves insufficient in-container, implement `ParecRecorder` — runs `parec --device=virtual_out.monitor --format=s16le --rate=44100 --channels=2` via `StdoutPipe()`. `parec` ships in `pulseaudio-utils` (already installed), keeping ffmpeg out of the production image. Satisfies `ChunkSource`. Swap in `cmd/shim/main.go`. An `FFmpegRecorder` stays deferred until Phase 4+ needs resampling/DSP downstream.
+
+### 3b.3 — Connectivity resilience
+
+- Reconnect when the daemon dies: a daemon crash (see Phase 3a recovery) tears down the recorder's connection; after the restart a new sink/monitor exists but the old stream is dead. Detect connection loss and reconnect against `virtual_out` with exponential backoff — keyed off the same probe/restart events where possible.
+- Startup must be safe against the daemon not being up yet.
+- Optional: log a periodic chunk/drop summary at debug level so a silenced recorder is distinguishable from digital silence.
 
 ### Verification
 
@@ -252,8 +275,22 @@ Inside the container:
 
 ```bash
 # shim log: "recorder started, reading from virtual_out.monitor"
+# a live recording stream proves the Go recorder is connected and flowing
+podman exec <ctr> sh -c 'XDG_RUNTIME_DIR=/tmp/runtime pactl list source-outputs short' | grep virtual_out
 podman exec <ctr> parec --device=virtual_out.monitor --format=s16le | head -c 1024 | wc -c
 # → 1024 (bytes flowing — silence is fine at this stage)
+#
+# 3b.2 note: the parec cross-check validates the monitor/daemon side — the Go
+# recorder's liveliness is proven by the active source-output above.
+```
+
+Crash-resilience check (3b.3):
+
+```bash
+podman exec <ctr> sh -c 'kill -9 $(cat /tmp/runtime/pulse/pid)'
+# shim log: "pulseaudio: daemon not reachable, restarting (attempt N)"
+# shim log (recorder): reconnected to virtual_out.monitor
+# debug chunk counter resumes incrementing
 ```
 
 ---
@@ -405,9 +442,9 @@ Phase 1  (skeleton + Containerfile)
   └── Phase 2a (Soloist binary management)
         └── Phase 2b (session check + pairing gate)
               └── Phase 2c (subprocess lifecycle + WebSocket)
-                    └── Phase 3a (PulseAudio daemon + virtual sink)
-                          └── Phase 3b (recorder)
-                                └── Phase 4  (/stream endpoint)
+└── Phase 3a (PulseAudio daemon + virtual sink)
+                            └── Phase 3b (recorder: core logic → live PulseAudio → resilience)
+                                  └── Phase 4  (/stream endpoint)
                                       └── Phase 5  (mock-teddycloud + SSE listener)  ← integration gate
                                             └── Phase 6  (hot-swap)
                                                   └── Phase 7  (real Teddycloud)
