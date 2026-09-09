@@ -18,6 +18,7 @@ import (
 	"github.com/janharings/teddycloud-spotify-radio-shim/internal/process"
 	"github.com/janharings/teddycloud-spotify-radio-shim/internal/server"
 	"github.com/janharings/teddycloud-spotify-radio-shim/internal/soloist"
+	"github.com/janharings/teddycloud-spotify-radio-shim/internal/sselistener"
 )
 
 const (
@@ -94,6 +95,11 @@ func main() {
 	// unpaired.
 	go runRecorder(ctx, pa, slot)
 
+	// Phase 5: Teddycloud SSE listener. Independent of pairing: events are
+	// translated into WebSocket commands which fail harmlessly ("not
+	// connected") until the Soloist session is attached.
+	go runSseListener(ctx, cfg, cc)
+
 	// Phase 2a: resolve Soloist binary before starting anything else.
 	bm := &soloist.BinaryManager{
 		ExplicitPath: cfg.SoloistBin,
@@ -128,6 +134,17 @@ func main() {
 		slog.Error("server error", "err", err)
 		os.Exit(1)
 	}
+}
+
+// runSseListener subscribes to the Teddycloud SSE stream and translates events
+// into Soloist WebSocket commands. It runs as an independent goroutine and
+// never gates on Soloist pairing.
+func runSseListener(ctx context.Context, cfg *config.Config, cc *soloist.CommandConnector) {
+	l := &sselistener.Listener{
+		URL:      cfg.TeddycloudURL,
+		Commands: cc,
+	}
+	l.Run(ctx)
 }
 
 // pairThenSupervisor drives the one-time pairing, then hands over to the

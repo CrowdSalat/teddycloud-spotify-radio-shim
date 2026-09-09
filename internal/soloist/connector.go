@@ -56,3 +56,35 @@ func (c *CommandConnector) Play(uri string) error {
 
 	return c.write(cmd)
 }
+
+type simpleCommand struct {
+	Type    string `json:"type"`
+	Command string `json:"command"`
+}
+
+func (c *CommandConnector) sendSimple(command string) error {
+	cmd, err := json.Marshal(simpleCommand{
+		Type:    "command",
+		Command: command,
+	})
+	if err != nil {
+		return err
+	}
+
+	return c.write(cmd)
+}
+
+// Pause pauses playback.
+func (c *CommandConnector) Pause() error {
+	return c.sendSimple("pause")
+}
+
+// SkipNext skips to the next track.
+func (c *CommandConnector) SkipNext() error {
+	return c.sendSimple("skip_next")
+}
+
+// SkipPrev skips to the previous track.
+func (c *CommandConnector) SkipPrev() error {
+	return c.sendSimple("skip_prev")
+}
