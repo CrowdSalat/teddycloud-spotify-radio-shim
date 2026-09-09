@@ -375,15 +375,15 @@ curl "http://localhost:8080/stream?spotify_uri=spotify:album:<id>" | ffplay -f w
 
 **Goal:** validate the SSE event format and the control mapping against the real Teddycloud and a real Toniebox, and **fix `cmd/mock-teddycloud` so the mock matches reality**. This is the point where assumed event formats get verified — the mock becomes trustworthy for the phases that follow.
 
-Do not expect `internal/sselistener` to need logic changes — that is the point of this phase's verification. If it does, the mock was built on an assumption, and is corrected here so Phase 7's development does not repeat the mismatch.
+Event formats were **discovered live** on 2026-09-09 — see [research/teddycloud-sse-events.md](research/teddycloud-sse-events.md) (raw capture: `research/teddycloud-sse-capture.txt`). They are the authoritative source for the mock fix. Notable: the real server has **no `TagInvalid`** (a figurine lift surfaces as `playback` `stopped`), and ears emit `pressed` + `ear-big`/`ear-small`. The listener may need a small change: map `playback` + `stopped` → pause; that is accepted here so Phase 7's development does not repeat the mismatch.
 
 ### Tasks
 
 - Reach the real Teddycloud without the auth proxy:
   - The OAuth proxy is a **sidecar** on port `4180` (Route only). Service port `80` targets the teddycloud container directly.
   - Local shim: `oc port-forward svc/teddycloud 8080:80 -n app-teddycloud` → `TEDDYCLOUD_URL=http://localhost:8080`. No OpenShift login needed.
-- Verify SSE event format matches what the listener expects. If parsing needs adjustment, change `internal/sselistener` accordingly.
-- **Fix the mock:** update `cmd/mock-teddycloud` so its SSE event payloads match the real server **byte-for-byte** — `figurine-placed` (incl. URI), `figurine-lifted`, `right-ear-slap`, `left-ear-slap`. The mock stays the standing dev harness for Phase 7.
+- Verify SSE event format matches the discovery doc. If parsing needs adjustment, change `internal/sselistener` accordingly (pause now comes from `playback` `stopped`).
+- **Fix the mock:** update `cmd/mock-teddycloud` so its SSE event payloads match the real server **byte-for-byte** per `research/teddycloud-sse-events.md` — `TagValid` (tonie UID, not URI), `playback` `starting/started/stopped`, `pressed` `ear-big`/`ear-small`, plus the `VolumeLevel`/`VolumedB` volume pairs and ~16 s keep-alive. The mock stays the standing dev harness for Phase 7.
 - Configure a figurine in Teddycloud: stream URL = `http://<shim>:8080/stream?spotify_uri=<URI>`.
 - Test the physical controls that do not depend on hot-swap: place → play, lift → pause, right ear → skip_next, left ear → skip_prev.
 - Figurine **swap** is deferred — it exercises the hot-swap logic of Phase 7 and is re-verified in the Phase 11 final acceptance.
@@ -393,12 +393,14 @@ Do not expect `internal/sselistener` to need logic changes — that is the point
 ```bash
 # SSE reachable without auth via port-forward (oauth-proxy sidecar bypassed)
 oc port-forward svc/teddycloud 8080:80 -n app-teddycloud
-curl -s http://localhost:8080/api/sse   # → heartbeats; capture event payloads on box action
+curl -s http://localhost:8080/api/sse   # → heartbeats; event payloads on box action
 
-# mock now matches the real server
+# mock now matches the real server byte-for-byte
+# trigger a figurine place on the real box, then on the mock (no --uri:
+# TagValid carries the tonie UID, not a Spotify URI)
 diff <(curl -s http://localhost:8080/api/sse) \
-     <(go run ./cmd/mock-teddycloud --uri spotify:album:<id>)
-# → no output
+     <(go run ./cmd/mock-teddycloud)
+# → equivalent event payloads for TagValid / playback / pressed (+ keep-alive), line for line
 ```
 
 - Place figurine → Spotify audio plays on a real Toniebox.
