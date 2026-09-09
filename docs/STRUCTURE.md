@@ -379,14 +379,7 @@ Event formats were **discovered live** on 2026-09-09 — see [research/teddyclou
 
 ### Tasks
 
-- Reach the real Teddycloud without the auth proxy:
-  - The OAuth proxy is a **sidecar** on port `4180` (Route only). Service port `80` targets the teddycloud container directly.
-  - Local shim: `oc port-forward svc/teddycloud 8080:80 -n app-teddycloud` → `TEDDYCLOUD_URL=http://localhost:8080`. No OpenShift login needed.
-- Verify SSE event format matches the discovery doc. If parsing needs adjustment, change `internal/sselistener` accordingly (pause now comes from `playback` `stopped`).
 - **Fix the mock:** update `cmd/mock-teddycloud` so its SSE event payloads match the real server **byte-for-byte** per `research/teddycloud-sse-events.md` — `TagValid` (tonie UID, not URI), `playback` `starting/started/stopped`, `pressed` `ear-big`/`ear-small`, plus the `VolumeLevel`/`VolumedB` volume pairs and ~16 s keep-alive. The mock stays the standing dev harness for Phase 7.
-- Configure a figurine in Teddycloud: stream URL = `http://<shim>:8080/stream?spotify_uri=<URI>`.
-- Test the physical controls that do not depend on hot-swap: place → play, lift → pause, right ear → skip_next, left ear → skip_prev.
-- Figurine **swap** is deferred — it exercises the hot-swap logic of Phase 7 and is re-verified in the Phase 11 final acceptance.
 
 ### Verification
 
@@ -492,6 +485,24 @@ rg -n "TODO|FIXME|fmt\.Print(l|f)?n?\(|log\.[A-Z]" --glob '*.go' --glob '!**/*_t
 #### Verification
 
 - README covers the four sections; every env var from the configuration reference appears in the README table; diagram matches DESIGN.md.
+
+### 8.5 — Comment audit
+
+Phase 6's live discovery changed the SSE reality (real Teddycloud emits `TagValid`/`playback`, no `TagInvalid`; ears are `pressed` `ear-big`/`ear-small`), and later phases may drift further. Doc comments must describe what the code actually does, not what an old design assumed.
+
+- Walk every package doc comment (`Package <name>` headers), struct/field docs, and protocol comments (SSE events, Soloist WS commands) in `internal/` and `cmd/`.
+- Cross-check each against the current code and the discovery in `docs/research/teddycloud-sse-events.md` — flag stale event names (`figurine-placed`, `figurine-lifted`, `TagInvalid`, `right-ear-slap`, ...), wrong keep-alive intervals, and superseded mapping notes.
+- Fix comments to match the implemented behaviour, not the other way around. Do not change behaviour in this subtask.
+- Note: this is a pointed pass over the whole codebase once phases 6–7 have settled the event/URI mapping — do not fold it into 8.2's marker cleanup.
+
+#### Verification
+
+```bash
+rg -i "figurine-placed|figurine-lifted|right-ear-slap|left-ear-slap|TagInvalid" --glob '*.go' docs/
+# → no stale event-name references in code comments or docs (except DESIGN.md, which keeps the abstract names)
+rg -n "keep-alive|keepalive" --glob '*.go'   # → interval matches the mock's 16 s
+go build ./... && golangci-lint run ./...
+```
 
 ---
 
