@@ -60,6 +60,9 @@ type Supervisor struct {
 	WSPortTimeout time.Duration
 	// Dialer dials the Soloist WebSocket. Nil uses websocket.DefaultDialer.
 	Dialer *websocket.Dialer
+	// Commands serialises WebSocket command writes for concurrent callers.
+	// Nil keeps today's inline-activate behaviour unchanged.
+	Commands *CommandConnector
 }
 
 // Run supervises Soloist until ctx is cancelled or the binary is expired.
@@ -157,8 +160,15 @@ func (s *Supervisor) runOnce(ctx context.Context, dialBackoff time.Duration) (st
 		}
 		dialBackoff = defaultDialRetry
 
-		if err := conn.WriteMessage(websocket.TextMessage, []byte(activateCommand)); err != nil {
+		if s.Commands != nil {
+			s.Commands.attach(conn)
+		}
+
+		if err := s.writeActivate(conn); err != nil {
 			slog.Warn("soloist ws: activate send failed", "err", err)
+			if s.Commands != nil {
+				s.Commands.detach()
+			}
 			_ = conn.Close()
 
 			continue
@@ -168,6 +178,9 @@ func (s *Supervisor) runOnce(ctx context.Context, dialBackoff time.Duration) (st
 		s.setHealth("")
 
 		consumeErr := s.wsConsume(ctx, conn)
+		if s.Commands != nil {
+			s.Commands.detach()
+		}
 		_ = conn.Close()
 
 		if ctx.Err() != nil {
@@ -280,6 +293,14 @@ func (s *Supervisor) wsConsume(ctx context.Context, conn *websocket.Conn) error 
 
 		slog.Debug("soloist ws event", "msg", string(msg))
 	}
+}
+
+func (s *Supervisor) writeActivate(conn *websocket.Conn) error {
+	if s.Commands != nil {
+		return s.Commands.write([]byte(activateCommand))
+	}
+
+	return conn.WriteMessage(websocket.TextMessage, []byte(activateCommand))
 }
 
 // args returns the Soloist Connect-mode command line.

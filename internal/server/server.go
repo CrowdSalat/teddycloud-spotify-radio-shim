@@ -8,22 +8,33 @@ import (
 	"sync"
 )
 
+// ChunkSource yields PCM chunks for /stream consumers.
+type ChunkSource interface {
+	Chunks() <-chan []byte
+}
+
 // Server is the shim HTTP server.
 type Server struct {
 	addr string
 	mux  *http.ServeMux
+
+	src  func() ChunkSource
+	play func(uri string) error
 
 	mu              sync.RWMutex
 	unhealthyReason string // non-empty → healthz returns 503
 }
 
 // New creates a new Server listening on addr.
-func New(addr string) *Server {
+func New(addr string, src func() ChunkSource, play func(uri string) error) *Server {
 	s := &Server{
 		addr: addr,
 		mux:  http.NewServeMux(),
+		src:  src,
+		play: play,
 	}
 	s.mux.HandleFunc("/healthz", s.handleHealthz)
+	s.mux.HandleFunc("/stream", s.handleStream)
 
 	return s
 }

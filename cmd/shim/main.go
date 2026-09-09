@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -37,6 +38,27 @@ const (
 	recorderSummaryInterval = 10 * time.Second
 )
 
+// recorderSlot holds the current live recorder for /stream consumers. The
+// recorder is recreated per reconnect, so the source changes over time.
+type recorderSlot struct {
+	mu  sync.Mutex
+	src audio.ChunkSource
+}
+
+func (r *recorderSlot) get() audio.ChunkSource {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return r.src
+}
+
+func (r *recorderSlot) set(src audio.ChunkSource) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.src = src
+}
+
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
@@ -49,7 +71,9 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	srv := server.New(cfg.ListenAddr)
+	slot := &recorderSlot{}
+	cc := &soloist.CommandConnector{}
+	srv := server.New(cfg.ListenAddr, func() server.ChunkSource { return slot.get() }, cc.Play)
 
 	// Phase 3a: PulseAudio daemon + virtual sink. SetupEnv runs synchronously so
 	// every later subprocess (Soloist, pactl) inherits HOME and XDG_RUNTIME_DIR.
@@ -68,7 +92,7 @@ func main() {
 	// Phase 3b.2: live monitor recorder. It runs independently of the Soloist
 	// branch below: audio flows even while the Soloist session is missing or
 	// unpaired.
-	go runRecorder(ctx, pa)
+	go runRecorder(ctx, pa, slot)
 
 	// Phase 2a: resolve Soloist binary before starting anything else.
 	bm := &soloist.BinaryManager{
@@ -88,7 +112,7 @@ func main() {
 		checker := &soloist.SessionChecker{DataDir: cfg.SoloistDataDir}
 		if checker.Check() == soloist.StateReady {
 			slog.Info("soloist session found, ready")
-			go runSupervisor(ctx, srv, cfg, binPath, bm)
+			go runSupervisor(ctx, srv, cfg, binPath, bm, cc)
 		} else {
 			srv.SetUnhealthy("soloist_unpaired")
 			slog.Warn(fmt.Sprintf(
@@ -96,7 +120,7 @@ func main() {
 				cfg.SoloistDeviceName,
 			))
 
-			go pairThenSupervisor(ctx, srv, cfg, binPath, bm)
+			go pairThenSupervisor(ctx, srv, cfg, binPath, bm, cc)
 		}
 	}
 
@@ -108,7 +132,7 @@ func main() {
 
 // pairThenSupervisor drives the one-time pairing, then hands over to the
 // Connect-mode supervisor once a session is stored.
-func pairThenSupervisor(ctx context.Context, srv *server.Server, cfg *config.Config, binPath string, bm *soloist.BinaryManager) {
+func pairThenSupervisor(ctx context.Context, srv *server.Server, cfg *config.Config, binPath string, bm *soloist.BinaryManager, cc *soloist.CommandConnector) {
 	pairer := &soloist.Pairer{
 		BinaryPath:    binPath,
 		DeviceName:    cfg.SoloistDeviceName,
@@ -123,7 +147,7 @@ func pairThenSupervisor(ctx context.Context, srv *server.Server, cfg *config.Con
 	switch soloist.Drive(ctx, pairer.Pair, pairingBackoffInitial, pairingBackoffMax) {
 	case soloist.PairDone:
 		slog.Info("soloist paired, session stored")
-		runSupervisor(ctx, srv, cfg, binPath, bm)
+		runSupervisor(ctx, srv, cfg, binPath, bm, cc)
 	case soloist.PairExpired:
 		srv.SetUnhealthy("soloist_expired")
 		slog.Error("soloist binary expired, pairing halted")
@@ -133,7 +157,7 @@ func pairThenSupervisor(ctx context.Context, srv *server.Server, cfg *config.Con
 // runSupervisor runs the Soloist Connect-mode subprocess and WebSocket
 // supervisor in the current goroutine until ctx is cancelled or soloist exits
 // with a non-retryable code.
-func runSupervisor(ctx context.Context, srv *server.Server, cfg *config.Config, binPath string, bm *soloist.BinaryManager) {
+func runSupervisor(ctx context.Context, srv *server.Server, cfg *config.Config, binPath string, bm *soloist.BinaryManager, cc *soloist.CommandConnector) {
 	supervisor := &soloist.Supervisor{
 		BinaryPath:    binPath,
 		DeviceName:    cfg.SoloistDeviceName,
@@ -142,6 +166,7 @@ func runSupervisor(ctx context.Context, srv *server.Server, cfg *config.Config, 
 		CacheDir:      cfg.SoloistCacheDir,
 		Manager:       process.ExecManager{},
 		BinaryManager: bm,
+		Commands:      cc,
 		Health:        func(reason string) { srv.SetUnhealthy(reason) },
 	}
 
@@ -152,7 +177,7 @@ func runSupervisor(ctx context.Context, srv *server.Server, cfg *config.Config, 
 // live virtual_out.monitor stream recording through PulseRecorder, reconnecting
 // with exponential backoff when the stream dies (e.g. after a daemon crash). It
 // never blocks the Soloist pairing or supervisor branches.
-func runRecorder(ctx context.Context, pa *audio.PulseAudio) {
+func runRecorder(ctx context.Context, pa *audio.PulseAudio, slot *recorderSlot) {
 	for !pa.Ready() {
 		select {
 		case <-ctx.Done():
@@ -178,6 +203,7 @@ func runRecorder(ctx context.Context, pa *audio.PulseAudio) {
 
 		rec := &audio.PulseRecorder{Source: stream}
 		rec.Start(ctx)
+		slot.set(rec)
 
 		attempt++
 		if attempt == 1 {
@@ -235,6 +261,7 @@ func runRecorder(ctx context.Context, pa *audio.PulseAudio) {
 			close(lostDone)
 			rec.Stop()
 			stream.Close()
+			slot.set(nil)
 
 			return
 		case <-rec.Done():
@@ -244,6 +271,7 @@ func runRecorder(ctx context.Context, pa *audio.PulseAudio) {
 			close(lostDone)
 			rec.Stop()
 			stream.Close()
+			slot.set(nil)
 
 			slog.Warn("recorder: stream lost, reconnecting",
 				"attempt", attempt, "backoff", backoff)
