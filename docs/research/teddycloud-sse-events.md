@@ -73,30 +73,30 @@ data: { "type":"playback", "data":"stopped" }
 ### Right ear (volume-up ear)
 
 ```
-event: pressed
-data: { "type":"pressed", "data":"ear-big" }
-
 event: VolumeLevel
 data: { "type":"VolumeLevel", "data":"12" }
 
 event: VolumedB
 data: { "type":"VolumedB", "data":"-3" }
+
+event: pressed
+data: { "type":"pressed", "data":"ear-big" }
 ```
 
 ### Left ear (volume-down ear)
 
 ```
-event: pressed
-data: { "type":"pressed", "data":"ear-small" }
-
 event: VolumeLevel
 data: { "type":"VolumeLevel", "data":"10" }
 
 event: VolumedB
 data: { "type":"VolumedB", "data":"-9" }
+
+event: pressed
+data: { "type":"pressed", "data":"ear-small" }
 ```
 
-Left-ear double press appears as `pressed` / `ear-small-double`. Knock/tilt is `knock` / `forward` or `backward`.
+Note the exact ordering from the raw capture: **`VolumeLevel` → `VolumedB` → `pressed`** in every instance. Left-ear double press appears as `pressed` / `ear-small-double`. Knock/tilt is `knock` / `forward` or `backward`.
 
 ---
 
@@ -111,7 +111,7 @@ Other deltas:
 
 - `TagValid` carries the **tonie UID hex**, not a URI and not JSON. `extractURI` returns `""` → `Play("")`. This is already the documented "real events carry no URI" case — the URI arrives via the `/stream?spotify_uri=` request, not SSE.
 - Ear presses are **accompanied by `VolumeLevel`/`VolumedB`** pairs. They are noise for the shim's control path (box-local volume) but should be reproduced in the mock for fidelity.
-- Keep-alive interval is ~16 s (mock: 15 s) — align to 16 s.
+- Keep-alive interval is ~16 s — the mock now uses 16 s.
 - Knock events (`forward`/`backward`) follow tilts; they are irrelevant to the control path.
 
 ## Control mapping (shim)
