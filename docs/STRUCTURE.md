@@ -431,82 +431,7 @@ Figurine swap on real hardware is re-verified in the Phase 11 final acceptance.
 
 ---
 
-## Phase 8 — Polish
-
-**Goal:** production-ready codebase.
-
-Split into independently verifiable tasks. Every subtask must keep `golangci-lint run ./...` at 0 issues — linting is a gate, not a deliverable.
-
-### 8.1 — Backoff refactor
-
-- Consolidate the duplicated exponential-backoff helpers — two identical `NextBackoff` (`internal/audio/pulse.go`, `internal/soloist/pair.go`), three identical ctx-aware `sleep` variants (`pulse.go`, `supervisor.go`, `cmd/shim/main.go` `recorderSleep`), and the duplicated `defaultStartBackoff`/`defaultMaxBackoff` (5 s/60 s) — into a new `internal/backoff` package:
-  ```
-  internal/backoff/backoff.go       backoff.Next(current, max), backoff.Sleep(ctx, d)
-  internal/backoff/backoff_test.go  single table test (union of both TestNextBackoff)
-  ```
-- `Next` doubles `current`, clamped at `max`, overflow-safe; `Sleep` returns `false` when ctx is cancelled. `internal/backoff` imports only `context`/`time`, so audio and soloist can both import it without a cycle.
-- Delete the three `sleep` copies, both `NextBackoff` copies, and both `TestNextBackoff` tables; swap the ~13 call sites.
-- Keep per-consumer tuning consts (`pairingBackoffInitial/Max`, `recorderBackoffInitial/Max`) and the struct getters (`startBackoff()`/`maxBackoff()`) where they are — they are consumer-specific, not shared defaults.
-
-#### Verification
-
-```bash
-gofmt -w internal/backoff internal/audio/pulse.go internal/soloist/pair.go internal/soloist/supervisor.go cmd/shim/main.go
-go build ./... && go vet ./... && go test ./... -count=1 && golangci-lint run ./...
-rg "NextBackoff|\bsleep\(" internal cmd | grep -v "_test.go"
-# → hitless except internal/backoff; behaviour identical to pre-refactor backoffs
-```
-
-### 8.2 — Structured logging + marker cleanup
-
-- Structured logging audit across all components: consistent slog field names (e.g. `err`, `attempt`, `backoff`), one component prefix per subsystem, no `fmt.Println`/`log` leftovers. `LOG_LEVEL` (debug/info/warn/error) controls the level.
-- Resolve all `TODO`/`FIXME` markers from earlier phases.
-
-#### Verification
-
-```bash
-# run shim with LOG_LEVEL=warn → no info/debug lines; with LOG_LEVEL=debug → recorder live summary
-rg -n "TODO|FIXME|fmt\.Print(l|f)?n?\(|log\.[A-Z]" --glob '*.go' --glob '!**/*_test.go'
-# → no output
-```
-
-### 8.3 — CI
-
-- GitHub Actions workflow: `go build ./...`, `go test ./...`, `golangci-lint run ./...` on push/PR (amd64 host runner is fine — no cross-compile needed for CI signals).
-
-#### Verification
-
-- Pushed workflow run is green on a feature branch before merging.
-
-### 8.4 — README
-
-- Pairing instructions, env var reference (see Configuration reference below), Makefile targets, architecture diagram.
-
-#### Verification
-
-- README covers the four sections; every env var from the configuration reference appears in the README table; diagram matches DESIGN.md.
-
-### 8.5 — Comment audit
-
-Phase 6's live discovery changed the SSE reality (real Teddycloud emits `TagValid`/`playback`, no `TagInvalid`; ears are `pressed` `ear-big`/`ear-small`), and later phases may drift further. Doc comments must describe what the code actually does, not what an old design assumed.
-
-- Walk every package doc comment (`Package <name>` headers), struct/field docs, and protocol comments (SSE events, Soloist WS commands) in `internal/` and `cmd/`.
-- Cross-check each against the current code and the discovery in `docs/research/teddycloud-sse-events.md` — flag stale event names (`figurine-placed`, `figurine-lifted`, `TagInvalid`, `right-ear-slap`, ...), wrong keep-alive intervals, and superseded mapping notes.
-- Fix comments to match the implemented behaviour, not the other way around. Do not change behaviour in this subtask.
-- Note: this is a pointed pass over the whole codebase once phases 6–7 have settled the event/URI mapping — do not fold it into 8.2's marker cleanup.
-
-#### Verification
-
-```bash
-rg -i "figurine-placed|figurine-lifted|right-ear-slap|left-ear-slap|TagInvalid" --glob '*.go' docs/
-# → no stale event-name references in code comments or docs (except DESIGN.md, which keeps the abstract names)
-rg -n "keep-alive|keepalive" --glob '*.go'   # → interval matches the mock's 16 s
-go build ./... && golangci-lint run ./...
-```
-
----
-
-## Phase 9 — Private container image in GitHub Container Registry
+## Phase 8 — Private container image in GitHub Container Registry
 
 **Goal:** the shim image is built and pushed to `ghcr.io/janharings/teddycloud-spotify-shim` as a **private** image. Soloist is not baked in — redistribution concern satisfied.
 
@@ -529,8 +454,8 @@ go build ./... && golangci-lint run ./...
   - Clean up local manifest: `podman manifest rm ghcr.io/janharings/teddycloud-spotify-shim:latest`.
 - `Makefile`: add `container-tag` target for versioned tags (e.g. `ghcr.io/janharings/teddycloud-spotify-shim:v0.1.0`).
 - Repository settings: ensure the GHCR package visibility is **Private** (Settings → Packages → teddycloud-spotify-shim → Visibility → Private).
-- `.github/workflows/`: CI workflow that builds and pushes on `main` branch pushes (optional, defer to Phase 8 CI task if preferred).
-- `README.md` (Phase 8): document how to pull the private image:
+- `.github/workflows/`: CI workflow that builds and pushes on `main` branch pushes (optional, defer to Phase 10 CI task if preferred).
+- `README.md` (Phase 10): document how to pull the private image:
   ```bash
   echo "$GITHUB_TOKEN" | podman login ghcr.io -u janharings --password-stdin
   podman pull ghcr.io/janharings/teddycloud-spotify-shim:latest
@@ -558,7 +483,7 @@ curl -s http://localhost:8080/healthz   # → 200 OK or 503 (soloist_missing exp
 
 ---
 
-## Phase 10 — Session migration script
+## Phase 9 — Session migration script
 
 **Goal:** a shell script copies the paired Soloist session from the local `container/soloist-data/` into the OpenShift PVC `soloist-session-data`, deleting any stale session for the same Spotify **user** first.
 
@@ -644,9 +569,84 @@ oc exec my-shim-pod -- ls /data/settings/Users/
 
 ---
 
+## Phase 10 — Polish
+
+**Goal:** production-ready codebase.
+
+Split into independently verifiable tasks. Every subtask must keep `golangci-lint run ./...` at 0 issues — linting is a gate, not a deliverable.
+
+### 10.1 — Backoff refactor
+
+- Consolidate the duplicated exponential-backoff helpers — two identical `NextBackoff` (`internal/audio/pulse.go`, `internal/soloist/pair.go`), three identical ctx-aware `sleep` variants (`pulse.go`, `supervisor.go`, `cmd/shim/main.go` `recorderSleep`), and the duplicated `defaultStartBackoff`/`defaultMaxBackoff` (5 s/60 s) — into a new `internal/backoff` package:
+  ```
+  internal/backoff/backoff.go       backoff.Next(current, max), backoff.Sleep(ctx, d)
+  internal/backoff/backoff_test.go  single table test (union of both TestNextBackoff)
+  ```
+- `Next` doubles `current`, clamped at `max`, overflow-safe; `Sleep` returns `false` when ctx is cancelled. `internal/backoff` imports only `context`/`time`, so audio and soloist can both import it without a cycle.
+- Delete the three `sleep` copies, both `NextBackoff` copies, and both `TestNextBackoff` tables; swap the ~13 call sites.
+- Keep per-consumer tuning consts (`pairingBackoffInitial/Max`, `recorderBackoffInitial/Max`) and the struct getters (`startBackoff()`/`maxBackoff()`) where they are — they are consumer-specific, not shared defaults.
+
+#### Verification
+
+```bash
+gofmt -w internal/backoff internal/audio/pulse.go internal/soloist/pair.go internal/soloist/supervisor.go cmd/shim/main.go
+go build ./... && go vet ./... && go test ./... -count=1 && golangci-lint run ./...
+rg "NextBackoff|\bsleep\(" internal cmd | grep -v "_test.go"
+# → hitless except internal/backoff; behaviour identical to pre-refactor backoffs
+```
+
+### 10.2 — Structured logging + marker cleanup
+
+- Structured logging audit across all components: consistent slog field names (e.g. `err`, `attempt`, `backoff`), one component prefix per subsystem, no `fmt.Println`/`log` leftovers. `LOG_LEVEL` (debug/info/warn/error) controls the level.
+- Resolve all `TODO`/`FIXME` markers from earlier phases.
+
+#### Verification
+
+```bash
+# run shim with LOG_LEVEL=warn → no info/debug lines; with LOG_LEVEL=debug → recorder live summary
+rg -n "TODO|FIXME|fmt\.Print(l|f)?n?\(|log\.[A-Z]" --glob '*.go' --glob '!**/*_test.go'
+# → no output
+```
+
+### 10.3 — CI
+
+- GitHub Actions workflow: `go build ./...`, `go test ./...`, `golangci-lint run ./...` on push/PR (amd64 host runner is fine — no cross-compile needed for CI signals).
+
+#### Verification
+
+- Pushed workflow run is green on a feature branch before merging.
+
+### 10.4 — README
+
+- Pairing instructions, env var reference (see Configuration reference below), Makefile targets, architecture diagram.
+
+#### Verification
+
+- README covers the four sections; every env var from the configuration reference appears in the README table; diagram matches DESIGN.md.
+
+### 10.5 — Comment audit
+
+Phase 6's live discovery changed the SSE reality (real Teddycloud emits `TagValid`/`playback`, no `TagInvalid`; ears are `pressed` `ear-big`/`ear-small`), and later phases may drift further. Doc comments must describe what the code actually does, not what an old design assumed.
+
+- Walk every package doc comment (`Package <name>` headers), struct/field docs, and protocol comments (SSE events, Soloist WS commands) in `internal/` and `cmd/`.
+- Cross-check each against the current code and the discovery in `docs/research/teddycloud-sse-events.md` — flag stale event names (`figurine-placed`, `figurine-lifted`, `TagInvalid`, `right-ear-slap`, ...), wrong keep-alive intervals, and superseded mapping notes.
+- Fix comments to match the implemented behaviour, not the other way around. Do not change behaviour in this subtask.
+- Note: this is a pointed pass over the whole codebase once phases 6–7 have settled the event/URI mapping — do not fold it into 10.2's marker cleanup.
+
+#### Verification
+
+```bash
+rg -i "figurine-placed|figurine-lifted|right-ear-slap|left-ear-slap|TagInvalid" --glob '*.go' docs/
+# → no stale event-name references in code comments or docs (except DESIGN.md, which keeps the abstract names)
+rg -n "keep-alive|keepalive" --glob '*.go'   # → interval matches the mock's 16 s
+go build ./... && golangci-lint run ./...
+```
+
+---
+
 ## Phase 11 — OpenShift manifests
 
-**Goal:** the shim can be deployed on OpenShift from declarative manifests in `container/ocp/`: PVC `soloist-session-data` mounted at `/data`, private GHCR image pull, Secret-fed `SOLOIST_API_KEY`, probes wired to `/healthz`. Requires the Phase 9 image and the Phase 10 migration script.
+**Goal:** the shim can be deployed on OpenShift from declarative manifests in `container/ocp/`: PVC `soloist-session-data` mounted at `/data`, private GHCR image pull, Secret-fed `SOLOIST_API_KEY`, probes wired to `/healthz`. Requires the Phase 8 image and the Phase 9 migration script.
 
 ### Tasks
 
@@ -654,7 +654,7 @@ oc exec my-shim-pod -- ls /data/settings/Users/
   - `namespace.yaml` — target namespace.
   - `pvc.yaml` — `soloist-session-data` PVC, `ReadWriteOnce`, 1 Gi, mounted at `/data` (`SOLOIST_DATA_DIR`).
   - `secret.yaml` — placeholder Secret template for `SOLOIST_API_KEY` (value via `oc create secret` or SealedSecret/ExternalSecret — never in git or the image). Deployment references it via `secretKeyRef`.
-  - `pushsecret.yaml` — `imagePullSecret` for the private GHCR registry (Phase 9).
+  - `pushsecret.yaml` — `imagePullSecret` for the private GHCR registry (Phase 8).
   - `deployment.yaml` — runs the `ghcr.io/janharings/teddycloud-spotify-shim` image:
     - `imagePullSecrets` referencing the GHCR push secret.
     - env: `TEDDYCLOUD_URL`, `SOLOIST_DEVICE_NAME`, `LOG_LEVEL`; `SOLOIST_API_KEY` via `secretKeyRef`.
@@ -708,11 +708,13 @@ Phase 1  (skeleton + Containerfile)
                                       └── Phase 5  (mock-teddycloud + SSE listener)  ← integration gate
                                             └── Phase 6  (real Teddycloud — validate & fix mock)
                                                   └── Phase 7  (hot-swap, against validated mock)
-                                                        └── Phase 8  (polish)
-                                                              └── Phase 9  (GHCR private image)
+                                                        └── Phase 8  (GHCR private image)
+                                                              └── Phase 9  (session migration script)
+                                                                    └── Phase 10 (polish)
+                                                                          └── Phase 11 (OpenShift manifests)
 
-Phase 10 (session migration script) — independent, can run any time after Phase 2b has a paired session.
-Phase 11 (OpenShift manifests) — needs Phase 9 image + Phase 10 migration script.
+Phase 9 (session migration script) — independent, can run any time after Phase 2b has a paired session.
+Phase 11 (OpenShift manifests) — needs Phase 8 image + Phase 9 migration script.
                                     └── final acceptance: Phase 6 hardware tests + Phase 7 figurine swap on the deployed pod
 
 cmd/mock-teddycloud scaffolding can be started any time after Phase 1.
