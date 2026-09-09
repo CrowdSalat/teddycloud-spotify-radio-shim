@@ -425,13 +425,235 @@ Only start this phase once Phase 5 (mock-teddycloud baseline) passes completely.
 
 **Goal:** production-ready codebase.
 
+Split into independently verifiable tasks. Every subtask must keep `golangci-lint run ./...` at 0 issues — linting is a gate, not a deliverable.
+
+### 8.1 — Backoff refactor
+
+- Consolidate the duplicated exponential-backoff helpers — two identical `NextBackoff` (`internal/audio/pulse.go`, `internal/soloist/pair.go`), three identical ctx-aware `sleep` variants (`pulse.go`, `supervisor.go`, `cmd/shim/main.go` `recorderSleep`), and the duplicated `defaultStartBackoff`/`defaultMaxBackoff` (5 s/60 s) — into a new `internal/backoff` package:
+  ```
+  internal/backoff/backoff.go       backoff.Next(current, max), backoff.Sleep(ctx, d)
+  internal/backoff/backoff_test.go  single table test (union of both TestNextBackoff)
+  ```
+- `Next` doubles `current`, clamped at `max`, overflow-safe; `Sleep` returns `false` when ctx is cancelled. `internal/backoff` imports only `context`/`time`, so audio and soloist can both import it without a cycle.
+- Delete the three `sleep` copies, both `NextBackoff` copies, and both `TestNextBackoff` tables; swap the ~13 call sites.
+- Keep per-consumer tuning consts (`pairingBackoffInitial/Max`, `recorderBackoffInitial/Max`) and the struct getters (`startBackoff()`/`maxBackoff()`) where they are — they are consumer-specific, not shared defaults.
+
+#### Verification
+
+```bash
+gofmt -w internal/backoff internal/audio/pulse.go internal/soloist/pair.go internal/soloist/supervisor.go cmd/shim/main.go
+go build ./... && go vet ./... && go test ./... -count=1 && golangci-lint run ./...
+rg "NextBackoff|\bsleep\(" internal cmd | grep -v "_test.go"
+# → hitless except internal/backoff; behaviour identical to pre-refactor backoffs
+```
+
+### 8.2 — Structured logging + marker cleanup
+
+- Structured logging audit across all components: consistent slog field names (e.g. `err`, `attempt`, `backoff`), one component prefix per subsystem, no `fmt.Println`/`log` leftovers. `LOG_LEVEL` (debug/info/warn/error) controls the level.
+- Resolve all `TODO`/`FIXME` markers from earlier phases.
+
+#### Verification
+
+```bash
+# run shim with LOG_LEVEL=warn → no info/debug lines; with LOG_LEVEL=debug → recorder live summary
+rg -n "TODO|FIXME|fmt\.Print(l|f)?n?\(|log\.[A-Z]" --glob '*.go' --glob '!**/*_test.go'
+# → no output
+```
+
+### 8.3 — CI
+
+- GitHub Actions workflow: `go build ./...`, `go test ./...`, `golangci-lint run ./...` on push/PR (amd64 host runner is fine — no cross-compile needed for CI signals).
+
+#### Verification
+
+- Pushed workflow run is green on a feature branch before merging.
+
+### 8.4 — README
+
+- Pairing instructions, env var reference (see Configuration reference below), Makefile targets, architecture diagram.
+
+#### Verification
+
+- README covers the four sections; every env var from the configuration reference appears in the README table; diagram matches DESIGN.md.
+
+---
+
+## Phase 9 — Private container image in GitHub Container Registry
+
+**Goal:** the shim image is built and pushed to `ghcr.io/janharings/teddycloud-spotify-shim` as a **private** image. Soloist is not baked in — redistribution concern satisfied.
+
 ### Tasks
 
-- Structured logging with `log/slog`. All components use consistent field names. `LOG_LEVEL` controls level.
-- Linting: all `.golangci.yml` issues resolved.
-- CI: GitHub Actions — `go build`, `go test`, `golangci-lint`.
-- README: pairing instructions, env var reference, Makefile targets, architecture diagram.
-- Resolve all `TODO`/`FIXME` markers from earlier phases.
+- `Makefile`: add `container-push-ghcr` target.
+  - Login: `podman login ghcr.io` (uses `GITHUB_TOKEN` or `gh auth token`).
+  - Build multi-arch manifest (amd64 primary, arm64 secondary):
+    ```
+    podman build --platform linux/amd64,linux/arm64 \
+      --manifest ghcr.io/janharings/teddycloud-spotify-shim:latest \
+      -f Containerfile .
+    ```
+  - Push:
+    ```
+    podman manifest push --all \
+      ghcr.io/janharings/teddycloud-spotify-shim:latest \
+      docker://ghcr.io/janharings/teddycloud-spotify-shim:latest
+    ```
+  - Clean up local manifest: `podman manifest rm ghcr.io/janharings/teddycloud-spotify-shim:latest`.
+- `Makefile`: add `container-tag` target for versioned tags (e.g. `ghcr.io/janharings/teddycloud-spotify-shim:v0.1.0`).
+- Repository settings: ensure the GHCR package visibility is **Private** (Settings → Packages → teddycloud-spotify-shim → Visibility → Private).
+- `.github/workflows/`: CI workflow that builds and pushes on `main` branch pushes (optional, defer to Phase 8 CI task if preferred).
+- `README.md` (Phase 8): document how to pull the private image:
+  ```bash
+  echo "$GITHUB_TOKEN" | podman login ghcr.io -u janharings --password-stdin
+  podman pull ghcr.io/janharings/teddycloud-spotify-shim:latest
+  ```
+
+### Verification
+
+```bash
+# push
+make container-push-ghcr
+# → "Pushed: docker.io/ghcr.io/janharings/teddycloud-spotify-shim:latest"
+
+# verify private (unauthenticated pull should fail)
+podman manifest inspect docker://ghcr.io/janharings/teddycloud-spotify-shim:latest
+# → 401 or 403 (not public)
+
+# pull with auth
+echo "$GITHUB_TOKEN" | podman login ghcr.io -u janharings --password-stdin
+podman pull ghcr.io/janharings/teddycloud-spotify-shim:latest
+podman run --rm \
+  -e SOLOIST_API_KEY=test -e TEDDYCLOUD_URL=http://localhost \
+  ghcr.io/janharings/teddycloud-spotify-shim:latest
+curl -s http://localhost:8080/healthz   # → 200 OK or 503 (soloist_missing expected — no session yet)
+```
+
+---
+
+## Phase 10 — Session migration script
+
+**Goal:** a shell script copies the paired Soloist session from the local `container/soloist-data/` into the OpenShift PVC `soloist-session-data`, deleting any stale session for the same Spotify **user** first.
+
+### Context
+
+The paired session lives in `container/soloist-data/settings/Users/<user-id>-user/`. The `<user-id>` is the Spotify account the session was paired with. On OpenShift, the PVC is mounted at `/data` (the `SOLOIST_DATA_DIR` default). If a session for the same user already exists on the PVC, it must be replaced — the old token is stale and re-pairing requires the device to match.
+
+The binary (`bin/soloist`) does not need to be migrated — it re-downloads at runtime if expired. The `cache/` directory is optional (can be ephemeral).
+
+### Tasks
+
+- `scripts/migrate-session.sh`:
+  - **Required argument:** `SOURCE_DIR` — path to local `container/soloist-data/` (or equivalent).
+  - **Required argument:** `TARGET_POD` — OpenShift pod name (or use `oc cp` directly to PVC via a temp pod).
+  - Determines the user ID from `SOURCE_DIR/settings/Users/` — there must be exactly one `<user-id>-user/` directory. Fail if none or more than one; fail if `settings/Users` is missing.
+  - Lists existing user directories in the target at `/data/settings/Users/`. If a directory with the **same `<user-id>-user`** name exists, delete it first (old session for the same user). Other users' sessions are left untouched.
+  - Copies the following from `SOURCE_DIR` to `/data/`:
+    - `.device_id`
+    - `settings/` (entire tree — includes `Users/<user-id>-user/` and `prefs`)
+  - Does **not** copy `bin/` (binary), `cache/` (ephemeral), `crashpad/` (debug), lock/pid files.
+  - Prints a summary: user ID, device ID, files copied, old session deleted (if any).
+  - Dry-run mode: `--dry-run` flag — prints what would happen without modifying the target.
+- `Makefile`: add `migrate-session` target:
+  ```makefile
+  migrate-session:
+  	./scripts/migrate-session.sh $(SOURCE_DIR) $(TARGET_POD)
+  ```
+  With `SOURCE_DIR ?= $(CURDIR)/container/soloist-data/` and `TARGET_POD` as a required override.
+
+### Session structure reference
+
+```
+container/soloist-data/
+├── .device_id                  ← device identity (UUID)
+├── settings/
+│   ├── prefs                   ← device preferences
+│   └── Users/
+│       └── <user-id>-user/     ← Spotify Connect pairing session
+│           ├── offline2        ← session token (critical)
+│           ├── prefs
+│           ├── offline_abp
+│           ├── offline_ep
+│           ├── offline_media
+│           ├── ad-state-storage.bnk
+│           └── offline_lists.bnk
+├── bin/soloist                 ← binary (do NOT migrate)
+├── cache/                      ← ephemeral (do NOT migrate)
+├── crashpad/                   ← debug (do NOT migrate)
+├── soloist.pid                 ← runtime (do NOT migrate)
+├── ws.port                     ← runtime (do NOT migrate)
+└── .lock                       ← runtime (do NOT migrate)
+```
+
+### Verification
+
+```bash
+# dry run — no changes on target
+./scripts/migrate-session.sh container/soloist-data/ my-shim-pod --dry-run
+# → "Would delete old session for user 31q2zwxalia2nc5hdgo4ldwydwvm-user on target"
+# → "Would copy settings/Users/31q2zwx...-user/ (6 files)"
+# → "Would copy .device_id, settings/prefs"
+
+# actual migration
+./scripts/migrate-session.sh container/soloist-data/ my-shim-pod
+# → "Deleted old session for user 31q2zwx...-user"
+# → "Copied session: user=31q2zwx... device=411af102-... files=8"
+
+# verify on target
+oc exec my-shim-pod -- cat /data/.device_id
+# → 411af102-a2a0-4adb-96fa-b1d46439cfd4
+oc exec my-shim-pod -- ls /data/settings/Users/
+# → 31q2zwxalia2nc5hdgo4ldwydwvm-user/
+
+# re-run is idempotent — old session for same user is replaced
+./scripts/migrate-session.sh container/soloist-data/ my-shim-pod
+# → "Deleted old session for user 31q2zwx...-user"
+# → "Copied session: user=31q2zwx... device=411af102-... files=8"
+
+# different user — old sessions preserved, new one added
+oc exec my-shim-pod -- ls /data/settings/Users/
+# → 31q2zwx...-user/  <other-user>-user/
+```
+
+---
+
+## Phase 11 — OpenShift manifests
+
+**Goal:** the shim can be deployed on OpenShift from declarative manifests in `container/ocp/`: PVC `soloist-session-data` mounted at `/data`, private GHCR image pull, Secret-fed `SOLOIST_API_KEY`, probes wired to `/healthz`. Requires the Phase 9 image and the Phase 10 migration script.
+
+### Tasks
+
+- Manifest files in `container/ocp/` (apply via `oc apply -k container/ocp/`, or `Makefile` `deploy-ocp` target):
+  - `namespace.yaml` — target namespace.
+  - `pvc.yaml` — `soloist-session-data` PVC, `ReadWriteOnce`, 1 Gi, mounted at `/data` (`SOLOIST_DATA_DIR`).
+  - `secret.yaml` — placeholder Secret template for `SOLOIST_API_KEY` (value via `oc create secret` or SealedSecret/ExternalSecret — never in git or the image). Deployment references it via `secretKeyRef`.
+  - `pushsecret.yaml` — `imagePullSecret` for the private GHCR registry (Phase 9).
+  - `deployment.yaml` — runs the `ghcr.io/janharings/teddycloud-spotify-shim` image:
+    - `imagePullSecrets` referencing the GHCR push secret.
+    - env: `TEDDYCLOUD_URL`, `SOLOIST_DEVICE_NAME`, `LOG_LEVEL`; `SOLOIST_API_KEY` via `secretKeyRef`.
+    - `volumeMounts`: PVC `soloist-session-data` at `/data`; `emptyDir` cache at `/cache` (`SOLOIST_CACHE_DIR`).
+    - `securityContext` per OpenShift `restricted-v2` SCC (image already `USER 65534:0`); run as the assigned random UID, no privilege escalation.
+    - liveness/readiness probes on `/healthz`.
+  - `service.yaml` — `ClusterIP` Service exposing `LISTEN_ADDR` (default `:8080`).
+  - `kustomization.yaml` — resources list + `generate` the Secret `stringData` placeholder (or document `oc create secret generic soloist-api-key`).
+- `Makefile`: `deploy-ocp` target — `oc apply -k container/ocp/`.
+
+### Verification
+
+```bash
+# scrub local session into the PVC via the script, then deploy
+./scripts/migrate-session.sh container/soloist-data/ my-shim-pod
+
+oc apply -k container/ocp/
+oc get pod -l app=teddycloud-spotify-shim
+# → Running, Ready 1/1
+oc get pvc soloist-session-data
+# → Bound
+
+# pod uses the migrated session, no re-pairing required
+oc logs deployment/teddycloud-spotify-shim | grep -i soloist
+# → "soloist ready, WebSocket connected" (no "Pairing now" — session restored)
+curl -s http://<route-or-svc>:8080/healthz   # → 200 OK
+```
 
 ---
 
@@ -449,6 +671,10 @@ Phase 1  (skeleton + Containerfile)
                                             └── Phase 6  (hot-swap)
                                                   └── Phase 7  (real Teddycloud)
                                                         └── Phase 8  (polish)
+                                                              └── Phase 9  (GHCR private image)
+
+Phase 10 (session migration script) — independent, can run any time after Phase 2b has a paired session.
+Phase 11 (OpenShift manifests) — needs Phase 9 image + Phase 10 migration script.
 
 cmd/mock-teddycloud scaffolding can be started any time after Phase 1.
 ```
