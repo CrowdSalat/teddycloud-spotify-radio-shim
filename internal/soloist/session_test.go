@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/janharings/teddycloud-spotify-radio-shim/internal/soloist"
+	"github.com/crowdsalat/teddycloud-spotify-radio-shim/internal/soloist"
 )
 
 func TestSessionChecker_MissingSession(t *testing.T) {

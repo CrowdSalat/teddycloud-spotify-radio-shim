@@ -13,12 +13,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/janharings/teddycloud-spotify-radio-shim/internal/audio"
-	"github.com/janharings/teddycloud-spotify-radio-shim/internal/config"
-	"github.com/janharings/teddycloud-spotify-radio-shim/internal/process"
-	"github.com/janharings/teddycloud-spotify-radio-shim/internal/server"
-	"github.com/janharings/teddycloud-spotify-radio-shim/internal/soloist"
-	"github.com/janharings/teddycloud-spotify-radio-shim/internal/sselistener"
+	"github.com/crowdsalat/teddycloud-spotify-radio-shim/internal/audio"
+	"github.com/crowdsalat/teddycloud-spotify-radio-shim/internal/config"
+	"github.com/crowdsalat/teddycloud-spotify-radio-shim/internal/process"
+	"github.com/crowdsalat/teddycloud-spotify-radio-shim/internal/server"
+	"github.com/crowdsalat/teddycloud-spotify-radio-shim/internal/soloist"
+	"github.com/crowdsalat/teddycloud-spotify-radio-shim/internal/sselistener"
 )
 
 const (

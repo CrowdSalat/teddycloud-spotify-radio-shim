@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/crowdsalat/teddycloud-spotify-radio-shim/internal/process"
 	"github.com/gorilla/websocket"
-	"github.com/janharings/teddycloud-spotify-radio-shim/internal/process"
 )
 
 const (

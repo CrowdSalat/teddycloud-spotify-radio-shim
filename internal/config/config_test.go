@@ -3,7 +3,7 @@ package config_test
 import (
 	"testing"
 
-	"github.com/janharings/teddycloud-spotify-radio-shim/internal/config"
+	"github.com/crowdsalat/teddycloud-spotify-radio-shim/internal/config"
 )
 
 func TestLoad_MissingRequired(t *testing.T) {

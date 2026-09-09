@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/janharings/teddycloud-spotify-radio-shim/internal/process"
+	"github.com/crowdsalat/teddycloud-spotify-radio-shim/internal/process"
 )
 
 // PairOutcome is the result of a pairing attempt or the pairing loop.

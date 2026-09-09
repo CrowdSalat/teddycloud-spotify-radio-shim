@@ -24,7 +24,7 @@ To keep the orchestration logic unit-testable, subprocess spawning is hidden beh
 
 ### Tasks
 
-- `go mod init github.com/janharings/teddycloud-spotify-radio-shim`
+- `go mod init github.com/crowdsalat/teddycloud-spotify-radio-shim`
 - Package layout:
   ```
   cmd/shim/            main entry point — wires concrete types to interfaces
@@ -433,7 +433,7 @@ Figurine swap on real hardware is re-verified in the Phase 11 final acceptance.
 
 ## Phase 8 — Private container image in GitHub Container Registry
 
-**Goal:** the shim image is built and pushed to `ghcr.io/janharings/teddycloud-spotify-shim` as a **private** image. Soloist is not baked in — redistribution concern satisfied.
+**Goal:** the shim image is built and pushed to `ghcr.io/crowdsalat/teddycloud-spotify-shim` as a **private** image. Soloist is not baked in — redistribution concern satisfied.
 
 ### Tasks
 
@@ -442,23 +442,23 @@ Figurine swap on real hardware is re-verified in the Phase 11 final acceptance.
   - Build multi-arch manifest (amd64 primary, arm64 secondary):
     ```
     podman build --platform linux/amd64,linux/arm64 \
-      --manifest ghcr.io/janharings/teddycloud-spotify-shim:latest \
+      --manifest ghcr.io/crowdsalat/teddycloud-spotify-shim:latest \
       -f Containerfile .
     ```
   - Push:
     ```
     podman manifest push --all \
-      ghcr.io/janharings/teddycloud-spotify-shim:latest \
-      docker://ghcr.io/janharings/teddycloud-spotify-shim:latest
+      ghcr.io/crowdsalat/teddycloud-spotify-shim:latest \
+      docker://ghcr.io/crowdsalat/teddycloud-spotify-shim:latest
     ```
-  - Clean up local manifest: `podman manifest rm ghcr.io/janharings/teddycloud-spotify-shim:latest`.
-- `Makefile`: add `container-tag` target for versioned tags (e.g. `ghcr.io/janharings/teddycloud-spotify-shim:v0.1.0`).
+  - Clean up local manifest: `podman manifest rm ghcr.io/crowdsalat/teddycloud-spotify-shim:latest`.
+- `Makefile`: add `container-tag` target for versioned tags (e.g. `ghcr.io/crowdsalat/teddycloud-spotify-shim:v0.1.0`).
 - Repository settings: ensure the GHCR package visibility is **Private** (Settings → Packages → teddycloud-spotify-shim → Visibility → Private).
 - `.github/workflows/`: CI workflow that builds and pushes on `main` branch pushes (optional, defer to Phase 10 CI task if preferred).
 - `README.md` (Phase 10): document how to pull the private image:
   ```bash
-  echo "$GITHUB_TOKEN" | podman login ghcr.io -u janharings --password-stdin
-  podman pull ghcr.io/janharings/teddycloud-spotify-shim:latest
+  echo "$GITHUB_TOKEN" | podman login ghcr.io -u crowdsalat --password-stdin
+  podman pull ghcr.io/crowdsalat/teddycloud-spotify-shim:latest
   ```
 
 ### Verification
@@ -466,18 +466,18 @@ Figurine swap on real hardware is re-verified in the Phase 11 final acceptance.
 ```bash
 # push
 make container-push-ghcr
-# → "Pushed: docker.io/ghcr.io/janharings/teddycloud-spotify-shim:latest"
+# → "Pushed: docker.io/ghcr.io/crowdsalat/teddycloud-spotify-shim:latest"
 
 # verify private (unauthenticated pull should fail)
-podman manifest inspect docker://ghcr.io/janharings/teddycloud-spotify-shim:latest
+podman manifest inspect docker://ghcr.io/crowdsalat/teddycloud-spotify-shim:latest
 # → 401 or 403 (not public)
 
 # pull with auth
-echo "$GITHUB_TOKEN" | podman login ghcr.io -u janharings --password-stdin
-podman pull ghcr.io/janharings/teddycloud-spotify-shim:latest
+echo "$GITHUB_TOKEN" | podman login ghcr.io -u crowdsalat --password-stdin
+podman pull ghcr.io/crowdsalat/teddycloud-spotify-shim:latest
 podman run --rm \
   -e SOLOIST_API_KEY=test -e TEDDYCLOUD_URL=http://localhost \
-  ghcr.io/janharings/teddycloud-spotify-shim:latest
+  ghcr.io/crowdsalat/teddycloud-spotify-shim:latest
 curl -s http://localhost:8080/healthz   # → 200 OK or 503 (soloist_missing expected — no session yet)
 ```
 
@@ -655,7 +655,7 @@ go build ./... && golangci-lint run ./...
   - `pvc.yaml` — `soloist-session-data` PVC, `ReadWriteOnce`, 1 Gi, mounted at `/data` (`SOLOIST_DATA_DIR`).
   - `secret.yaml` — placeholder Secret template for `SOLOIST_API_KEY` (value via `oc create secret` or SealedSecret/ExternalSecret — never in git or the image). Deployment references it via `secretKeyRef`.
   - `pushsecret.yaml` — `imagePullSecret` for the private GHCR registry (Phase 8).
-  - `deployment.yaml` — runs the `ghcr.io/janharings/teddycloud-spotify-shim` image:
+  - `deployment.yaml` — runs the `ghcr.io/crowdsalat/teddycloud-spotify-shim` image:
     - `imagePullSecrets` referencing the GHCR push secret.
     - env: `TEDDYCLOUD_URL`, `SOLOIST_DEVICE_NAME`, `LOG_LEVEL`; `SOLOIST_API_KEY` via `secretKeyRef`.
     - `volumeMounts`: PVC `soloist-session-data` at `/data`; `emptyDir` cache at `/cache` (`SOLOIST_CACHE_DIR`).

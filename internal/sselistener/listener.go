@@ -28,7 +28,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/janharings/teddycloud-spotify-radio-shim/internal/audio"
+	"github.com/crowdsalat/teddycloud-spotify-radio-shim/internal/audio"
 )
 
 const (

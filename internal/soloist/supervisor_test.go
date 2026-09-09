@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/crowdsalat/teddycloud-spotify-radio-shim/internal/soloist"
 	"github.com/gorilla/websocket"
-	"github.com/janharings/teddycloud-spotify-radio-shim/internal/soloist"
 )
 
 func newSupervisor(dir string, m *stubManager, health chan string) *soloist.Supervisor {

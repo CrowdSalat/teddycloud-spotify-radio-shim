@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/janharings/teddycloud-spotify-radio-shim/internal/process"
+	"github.com/crowdsalat/teddycloud-spotify-radio-shim/internal/process"
 )
 
 // Health reason reported while PulseAudio is down or restarting.

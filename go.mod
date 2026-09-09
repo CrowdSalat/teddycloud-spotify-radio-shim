@@ -1,4 +1,4 @@
-module github.com/janharings/teddycloud-spotify-radio-shim
+module github.com/crowdsalat/teddycloud-spotify-radio-shim
 
 go 1.26.4
 

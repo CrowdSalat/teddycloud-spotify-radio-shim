@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/janharings/teddycloud-spotify-radio-shim/internal/process"
-	"github.com/janharings/teddycloud-spotify-radio-shim/internal/soloist"
+	"github.com/crowdsalat/teddycloud-spotify-radio-shim/internal/process"
+	"github.com/crowdsalat/teddycloud-spotify-radio-shim/internal/soloist"
 )
 
 // stubProcess is a test Process whose exit behaviour is fully controlled by
