@@ -24,10 +24,10 @@ spec:
     spec:
       imagePullSecrets:
         - name: ghcr-pull
+      hostUsers: false          # pod-spec level (not securityContext); required by restricted-v3
       securityContext:
         runAsNonRoot: true
-        fsGroup: 1000         # restricted-v3 allows [1000-65534]; group 0 is rejected
-        hostUsers: false      # restricted-v3 requires a pod-level user namespace
+        fsGroup: 1000           # restricted-v3 allows [1000-65534]; group 0 is rejected
         seccompProfile:
           type: RuntimeDefault
       containers:
