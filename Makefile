@@ -61,4 +61,8 @@ container-push-ghcr: GHCR_PUSH
 container-tag: GHCR_TAG=$(VERSION)
 container-tag: GHCR_PUSH
 
-.PHONY: build test lint container-build container-run container-push GHCR_PUSH container-push-ghcr container-tag
+## Regenerate the committed CHANGELOG.md from git history (requires git-cliff).
+changelog:
+	git-cliff -o CHANGELOG.md
+
+.PHONY: build test lint container-build container-run container-push GHCR_PUSH container-push-ghcr container-tag changelog
