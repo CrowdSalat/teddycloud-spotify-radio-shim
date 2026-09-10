@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [unreleased]
 
+### Bug Fixes
+
+- *(ocp)* Point ExternalSecret at Infisical store, match cluster template
+- *(container)* Fully qualify base image names for multi-arch builds
+
+### Build
+
+- Add OCI source label for GHCR repo linking
+## [0.1.1] - 2026-09-10
+
 ### Documentation
 
 - *(structure)* Mark phases 9 and 11 implemented
@@ -11,6 +21,7 @@ All notable changes to this project will be documented in this file.
 ### Miscellaneous
 
 - Bump golangci-lint-action to v7 for golangci-lint v2
+- Update changelog for v0.1.1
 ## [0.1.0] - 2026-09-10
 
 ### Features
