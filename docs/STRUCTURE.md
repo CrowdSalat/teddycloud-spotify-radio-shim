@@ -20,6 +20,8 @@ To keep the orchestration logic unit-testable, subprocess spawning is hidden beh
 
 ## Phase 1 — Skeleton: Go module, config, HTTP, Containerfile
 
+**Status: done**
+
 **Goal:** the shim compiles, passes lint, serves `/healthz`, and runs inside a container.
 
 ### Tasks
@@ -66,6 +68,8 @@ curl -s http://localhost:8080/healthz   # → 200 OK
 
 ## Phase 2a — Soloist binary management
 
+**Status: done**
+
 **Goal:** the shim finds or downloads the Soloist binary and verifies it executes.
 
 ### Tasks
@@ -93,6 +97,8 @@ curl -s http://localhost:8080/healthz   # → not soloist_missing
 ---
 
 ## Phase 2b — Session check + auto-pairing gate
+
+**Status: done**
 
 **Goal:** the shim detects whether Soloist has a stored session and, when it does not, drives the one-time Spotify Connect pairing itself — no manual `soloist --pair` run or host-side step required.
 
@@ -137,6 +143,8 @@ curl -s http://localhost:8080/healthz   # → 200 OK (transition is automatic, n
 
 ## Phase 2c — Soloist subprocess lifecycle + WebSocket
 
+**Status: done**
+
 **Goal:** the shim spawns Soloist in Connect mode, holds an open WebSocket, and handles all exit conditions.
 
 > Start only after the Phase 2b pairing gate has a stored session. Connect-mode spawning below owns the runtime subprocess; the pair-mode subprocess of Phase 2b is a different, one-time invocation.
@@ -177,6 +185,8 @@ curl -s http://localhost:8080/healthz   # → 200 OK
 ---
 
 ## Phase 3a — PulseAudio daemon + virtual sink
+
+**Status: done**
 
 **Goal:** the shim starts PulseAudio and the virtual sink is available. No recorder yet.
 
@@ -234,6 +244,8 @@ podman exec <ctr> sh -c 'XDG_RUNTIME_DIR=/tmp/runtime pactl list sinks short'  #
 ---
 
 ## Phase 3b — Recorder
+
+**Status: done**
 
 **Goal:** the shim reads PCM bytes from `virtual_out.monitor`. Silence is fine — no Soloist playing yet.
 
@@ -297,6 +309,8 @@ podman exec <ctr> sh -c 'kill -9 $(cat /tmp/runtime/pulse/pid)'
 
 ## Phase 4 — `/stream` endpoint
 
+**Status: done**
+
 **Goal:** `curl /stream | ffplay` plays Spotify audio end-to-end.
 
 ### Tasks
@@ -325,6 +339,8 @@ curl -s "http://localhost:8080/stream?spotify_uri=spotify:album:<id>" | \
 ---
 
 ## Phase 5 — `cmd/mock-teddycloud` + SSE listener
+
+**Status: done**
 
 **Goal:** full baseline integration test without a real Toniebox or Teddycloud. This is the integration gate — Phases 6–7 start only after this phase passes.
 
@@ -373,6 +389,8 @@ curl "http://localhost:8080/stream?spotify_uri=spotify:album:<id>" | ffplay -f w
 
 ## Phase 6 — Integration with real Teddycloud
 
+**Status: done** — live-discovered event formats captured and fixes applied (2026-09-09).
+
 **Goal:** validate the SSE event format and the control mapping against the real Teddycloud and a real Toniebox, and **fix `cmd/mock-teddycloud` so the mock matches reality**. This is the point where assumed event formats get verified — the mock becomes trustworthy for the phases that follow.
 
 Event formats were **discovered live** on 2026-09-09 — see [research/teddycloud-sse-events.md](research/teddycloud-sse-events.md) (raw capture: `research/teddycloud-sse-capture.txt`). They are the authoritative source for the mock fix. Notable: the real server has **no `TagInvalid`** (a figurine lift surfaces as `playback` `stopped`), and ears emit `pressed` + `ear-big`/`ear-small`. The listener may need a small change: map `playback` + `stopped` → pause; that is accepted here so Phase 7's development does not repeat the mismatch.
@@ -406,6 +424,8 @@ diff <(curl -s http://localhost:8080/api/sse) \
 
 ## Phase 7 — Hot-swap
 
+**Status: done** — implemented and verified against the mock; real-hardware figurine swap is part of Phase 11 final acceptance.
+
 **Goal:** swapping figurines replaces the active stream with no shim restart. Developed and verified against the Phase 6-validated mock — no Toniebox required.
 
 ### Tasks
@@ -432,6 +452,8 @@ Figurine swap on real hardware is re-verified in the Phase 11 final acceptance.
 ---
 
 ## Phase 8 — Private container image in GitHub Container Registry
+
+**Status: partial** — 8.1/8.2/8.4 tooling implemented and committed; 8.3 pending (GHCR package visibility → Private, plus first tag-driven publish).
 
 **Goal:** the shim image is built and pushed to `ghcr.io/crowdsalat/teddycloud-spotify-shim` as a **private** image. Soloist is not baked in — redistribution concern satisfied.
 
