@@ -705,6 +705,8 @@ go build ./... && golangci-lint run ./...
 
 **Goal:** the shim can be deployed on OpenShift from declarative manifests in `container/ocp/`: PVC `soloist-session-data` mounted at `/data`, private GHCR image pull, Secret-fed `SOLOIST_API_KEY`, probes wired to `/healthz`. Requires the Phase 8 image and the Phase 9 migration script.
 
+> **Investigate:** the current `restricted-v3` SCC solution feels overly complicated. We set `hostUsers: false` at the pod-`spec` level (a field `securityContext` silently prunes because it does not exist there) plus `fsGroup: 1000` because `restricted-v3`'s `MustRunAs` range rejects GID 0. `runAsNonRoot`/`seccompProfile` would be auto-mutated by admission, and OpenShift would allocate `fsGroup` from the range anyway. Worth investigating whether a minimal spec (just `hostUsers: false` + no `securityContext` block, letting admission fill the rest) validates, and whether the PVC remains writable under user namespaces without an explicit stable `fsGroup`.
+
 ### Tasks
 
 - Manifest files in `container/ocp/` (apply via `oc apply -k container/ocp/`, or `Makefile` `deploy-ocp` target):
