@@ -24,6 +24,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /shim /shim
 
+LABEL org.opencontainers.image.source=https://github.com/CrowdSalat/teddycloud-spotify-radio-shim
+
 # Nobody user, root group — OpenShift restricted-v2 SCC compatible.
 USER 65534:0
 
