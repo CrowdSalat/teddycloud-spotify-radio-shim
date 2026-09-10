@@ -1,5 +1,5 @@
-# ghcr.io pull credentials. The image is private, so every pod needs an
-# imagePullSecret. Create once (token from GitHub with packages:read):
+# ghcr.io image is public — no imagePullSecret required. If it ever becomes
+# private again, create the pull secret and reference it here:
 #   oc create secret docker-registry ghcr-pull \
 #     --docker-server=ghcr.io --docker-username=crowdsalat \
 #     --docker-password="$GITHUB_TOKEN" -n app-teddycloud
@@ -22,8 +22,6 @@ spec:
       labels:
         app: teddycloud-spotify-shim
     spec:
-      imagePullSecrets:
-        - name: ghcr-pull
       hostUsers: false          # pod-spec level (not securityContext); required by restricted-v3
       securityContext:
         runAsNonRoot: true
