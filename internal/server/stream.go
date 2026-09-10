@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"log/slog"
@@ -30,6 +31,26 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+
+	s.streamMu.Lock()
+	if s.streamCancel != nil {
+		s.streamCancel()
+	}
+	s.streamID++
+	myID := s.streamID
+	s.streamCancel = cancel
+	s.streamMu.Unlock()
+
+	defer func() {
+		s.streamMu.Lock()
+		if s.streamID == myID {
+			s.streamCancel = nil
+		}
+		s.streamMu.Unlock()
+	}()
+
 	if s.play != nil {
 		if err := s.play(uri); err != nil {
 			slog.Warn("soloist play failed", "uri", uri, "err", err)
@@ -44,7 +65,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	ch := src.Chunks()
 	for {
 		select {
-		case <-r.Context().Done():
+		case <-ctx.Done():
 			return
 		case chunk, ok := <-ch:
 			if !ok {

@@ -2,9 +2,12 @@ package server
 
 import (
 	"encoding/binary"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
+	"time"
 )
 
 type fakeChunkSource struct {
@@ -151,5 +154,86 @@ func TestStream_PlayCalled(t *testing.T) {
 
 	if playedURI != "spotify:album:XYZ789" {
 		t.Errorf("play URI: got %q, want %q", playedURI, "spotify:album:XYZ789")
+	}
+}
+
+func TestStream_HotSwap(t *testing.T) {
+	ch := make(chan []byte, 1024)
+	var plays []string
+	var playMu sync.Mutex
+
+	s := New("localhost:0", func() ChunkSource {
+		return &fakeChunkSource{ch: ch}
+	}, func(uri string) error {
+		playMu.Lock()
+		plays = append(plays, uri)
+		playMu.Unlock()
+		return nil
+	})
+
+	srv := httptest.NewServer(s.mux)
+	defer srv.Close()
+
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			select {
+			case ch <- []byte("audio"):
+			case <-stop:
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+
+	respA, err := http.Get(srv.URL + "/stream?spotify_uri=spotify:album:AAA")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer respA.Body.Close()
+
+	buf := make([]byte, 256)
+	if _, err := io.ReadFull(respA.Body, buf[:44]); err != nil {
+		t.Fatalf("client A header read: %v", err)
+	}
+	if _, err := respA.Body.Read(buf); err != nil {
+		t.Fatalf("client A first chunk read: %v", err)
+	}
+
+	respB, err := http.Get(srv.URL + "/stream?spotify_uri=spotify:album:BBB")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer respB.Body.Close()
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(io.Discard, respA.Body)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("client A did not terminate after hot-swap")
+	}
+
+	playMu.Lock()
+	defer playMu.Unlock()
+
+	if len(plays) != 2 {
+		t.Fatalf("play calls: got %d, want 2", len(plays))
+	}
+	if plays[0] != "spotify:album:AAA" {
+		t.Errorf("play[0]: got %q, want %q", plays[0], "spotify:album:AAA")
+	}
+	if plays[1] != "spotify:album:BBB" {
+		t.Errorf("play[1]: got %q, want %q", plays[1], "spotify:album:BBB")
 	}
 }

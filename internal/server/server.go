@@ -23,6 +23,10 @@ type Server struct {
 
 	mu              sync.RWMutex
 	unhealthyReason string // non-empty → healthz returns 503
+
+	streamMu     sync.Mutex
+	streamID     int64
+	streamCancel context.CancelFunc
 }
 
 // New creates a new Server listening on addr.
