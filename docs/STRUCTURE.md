@@ -546,6 +546,8 @@ curl -s http://localhost:8080/healthz   # → 200 OK or 503 (soloist_missing exp
 
 ## Phase 9 — Session migration script
 
+**Status: implemented** — `scripts/migrate-session.sh` + `migrate-session` make target; pending verification against an OpenShift pod/PVC.
+
 **Goal:** a shell script copies the paired Soloist session from the local `container/soloist-data/` into the OpenShift PVC `soloist-session-data`, deleting any stale session for the same Spotify **user** first.
 
 ### Context
@@ -698,6 +700,8 @@ go build ./... && golangci-lint run ./...
 ---
 
 ## Phase 11 — OpenShift manifests
+
+**Status: implemented** — `container/ocp/` Kustomize app + `deploy-ocp` make target; pending apply and final acceptance on OpenShift.
 
 **Goal:** the shim can be deployed on OpenShift from declarative manifests in `container/ocp/`: PVC `soloist-session-data` mounted at `/data`, private GHCR image pull, Secret-fed `SOLOIST_API_KEY`, probes wired to `/healthz`. Requires the Phase 8 image and the Phase 9 migration script.
 
