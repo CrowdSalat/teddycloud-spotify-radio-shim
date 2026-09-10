@@ -435,7 +435,9 @@ Figurine swap on real hardware is re-verified in the Phase 11 final acceptance.
 
 **Goal:** the shim image is built and pushed to `ghcr.io/crowdsalat/teddycloud-spotify-shim` as a **private** image. Soloist is not baked in — redistribution concern satisfied.
 
-### Tasks
+Split into independently verifiable subtasks. The push itself is driven by the 8.2 CI workflow using the auto-provisioned `GITHUB_TOKEN` — no manual PAT required.
+
+### 8.1 — Makefile targets
 
 - `Makefile`: add `container-push-ghcr` target.
   - Login: `podman login ghcr.io` (uses `GITHUB_TOKEN` or `gh auth token`).
@@ -453,13 +455,50 @@ Figurine swap on real hardware is re-verified in the Phase 11 final acceptance.
     ```
   - Clean up local manifest: `podman manifest rm ghcr.io/crowdsalat/teddycloud-spotify-shim:latest`.
 - `Makefile`: add `container-tag` target for versioned tags (e.g. `ghcr.io/crowdsalat/teddycloud-spotify-shim:v0.1.0`).
+
+### 8.2 — CI workflow (GHCR push)
+
+- GitHub Actions workflow covering the Go checks and the GHCR build/push. Push uses the automatically provisioned `GITHUB_TOKEN` (`permissions: contents: read, packages: write`) — no manual token or secret.
+  - Checks-only job on push (all branches) and PRs: `go build ./...`, `go test ./...`, `golangci-lint run ./...` (amd64 host runner is fine — no cross-compile needed for CI signals).
+  - Build+push job triggered only by **version tags** matching `v*` (semver `vMAJOR.MINOR.PATCH`, pre-releases like `v0.2.0-rc.1` allowed):
+    - Version = the git tag itself (`$GITHUB_REF_NAME` → `vX.Y.Z`). Release by `git tag vX.Y.Z && git push origin vX.Y.Z`. **Version tags are immutable — never delete or overwrite a published one.**
+    - Publishes `ghcr.io/crowdsalat/teddycloud-spotify-shim:vX.Y.Z` (immutable release artifact) and moves `:latest` to it (convenience pointer, not a version; not updated on main pushes).
+    - Multi-arch via `docker/setup-buildx-action` + `docker/build-push-action` (QEMU binfmt): `linux/amd64` (primary) + `linux/arm64`.
+    - Tag build gates on the Go checks passing first.
+  - v0 bump policy (Go module convention): MINOR for features / breaking changes (`v0.1.0` → `v0.2.0`), PATCH for bugfixes (`v0.1.0` → `v0.1.1`).
+  - Moved here from the former Phase 10.3 so the image-publishing pipeline is owned by the phase that needs it.
+
+#### Verification
+
+- Pushed workflow run is green on a feature branch before merging (checks-only job).
+- Pushing a `v*` tag lands `:vX.Y.Z` (+ `:latest` pointer) in GHCR; `podman pull ghcr.io/crowdsalat/teddycloud-spotify-shim:vX.Y.Z` succeeds with auth.
+
+### 8.3 — Repository visibility + pull docs
+
 - Repository settings: ensure the GHCR package visibility is **Private** (Settings → Packages → teddycloud-spotify-shim → Visibility → Private).
-- `.github/workflows/`: CI workflow that builds and pushes on `main` branch pushes (optional, defer to Phase 10 CI task if preferred).
-- `README.md` (Phase 10): document how to pull the private image:
+- `README.md`: document how to pull the private image:
   ```bash
   echo "$GITHUB_TOKEN" | podman login ghcr.io -u crowdsalat --password-stdin
   podman pull ghcr.io/crowdsalat/teddycloud-spotify-shim:latest
   ```
+
+### 8.4 — Changelog generation (git-cliff)
+
+- Generate the release changelog from commits with [git-cliff](https://git-cliff.org) — the repo already follows Conventional Commits, so messages parse as-is.
+  - `cliff.toml` — default conventional template: per-version sections grouped by type (Features, Bug Fixes, Performance, Documentation, Refactor, Others), scoped to the git range since the previous tag.
+  - `Makefile`: `changelog` target — regenerate the committed `CHANGELOG.md` (`git-cliff -o CHANGELOG.md`). Requires `git-cliff` installed.
+  - Release flow (ties into 8.2): before tagging a release — run `make changelog`, commit `CHANGELOG.md` with the release commit, then `git tag vX.Y.Z && git push origin vX.Y.Z` (the tag triggers the 8.2 publish job; version = the tag). git-cliff groups the commits since the previous tag; it does not choose the version.
+  - The version bump stays a manual choice per the 8.2 v0 policy — git-cliff's `--next-version` is a suggestion only, never applied automatically.
+  - `CHANGELOG.md` is a committed artifact; it is not generated at CI time.
+  - Optional: the 8.2 publish job may embed the new section into the GitHub Release body.
+
+#### Verification
+
+```bash
+make changelog
+git diff CHANGELOG.md       # → new unreleased section, conventional grouping (feat/fix/docs/refactor)
+# release: commit changelog → git tag vX.Y.Z → push tag (CI publishes the image)
+```
 
 ### Verification
 
@@ -608,15 +647,7 @@ rg -n "TODO|FIXME|fmt\.Print(l|f)?n?\(|log\.[A-Z]" --glob '*.go' --glob '!**/*_t
 # → no output
 ```
 
-### 10.3 — CI
-
-- GitHub Actions workflow: `go build ./...`, `go test ./...`, `golangci-lint run ./...` on push/PR (amd64 host runner is fine — no cross-compile needed for CI signals).
-
-#### Verification
-
-- Pushed workflow run is green on a feature branch before merging.
-
-### 10.4 — README
+### 10.3 — README
 
 - Pairing instructions, env var reference (see Configuration reference below), Makefile targets, architecture diagram.
 
@@ -624,7 +655,7 @@ rg -n "TODO|FIXME|fmt\.Print(l|f)?n?\(|log\.[A-Z]" --glob '*.go' --glob '!**/*_t
 
 - README covers the four sections; every env var from the configuration reference appears in the README table; diagram matches DESIGN.md.
 
-### 10.5 — Comment audit
+### 10.4 — Comment audit
 
 Phase 6's live discovery changed the SSE reality (real Teddycloud emits `TagValid`/`playback`, no `TagInvalid`; ears are `pressed` `ear-big`/`ear-small`), and later phases may drift further. Doc comments must describe what the code actually does, not what an old design assumed.
 
