@@ -4,6 +4,7 @@ resources:
   - namespace.yaml
   - pvc.yaml
   - externalsecret.yaml
+  - externalsecret-ghcr.yaml
   - deployment.yaml
   - service.yaml
   - route.yaml
