@@ -26,7 +26,8 @@ spec:
         - name: ghcr-pull
       securityContext:
         runAsNonRoot: true
-        fsGroup: 0            # root group → the PVC (setgid) is writable by UID 65534
+        fsGroup: 1000         # restricted-v3 allows [1000-65534]; group 0 is rejected
+        hostUsers: false      # restricted-v3 requires a pod-level user namespace
         seccompProfile:
           type: RuntimeDefault
       containers:
