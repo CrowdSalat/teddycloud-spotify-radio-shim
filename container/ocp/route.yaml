@@ -1,0 +1,15 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: teddycloud-spotify-shim
+  namespace: app-teddycloud
+  labels:
+    app: teddycloud-spotify-shim
+spec:
+  to:
+    kind: Service
+    name: teddycloud-spotify-shim
+  port:
+    targetPort: http
+  # Host is auto-generated from the Route. Only needed for out-of-band
+  # manual checks (curl /healthz); the shim needs no inbound ingress.

@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: teddycloud-spotify-shim
+  namespace: app-teddycloud
+  labels:
+    app: teddycloud-spotify-shim
+spec:
+  selector:
+    app: teddycloud-spotify-shim
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080

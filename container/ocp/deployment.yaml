@@ -1,0 +1,85 @@
+# ghcr.io pull credentials. The image is private, so every pod needs an
+# imagePullSecret. Create once (token from GitHub with packages:read):
+#   oc create secret docker-registry ghcr-pull \
+#     --docker-server=ghcr.io --docker-username=crowdsalat \
+#     --docker-password="$GITHUB_TOKEN" -n app-teddycloud
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: teddycloud-spotify-shim
+  namespace: app-teddycloud
+  labels:
+    app: teddycloud-spotify-shim
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate  # single pod, RWO PVC, and Soloist wants one stable active device
+  selector:
+    matchLabels:
+      app: teddycloud-spotify-shim
+  template:
+    metadata:
+      labels:
+        app: teddycloud-spotify-shim
+    spec:
+      imagePullSecrets:
+        - name: ghcr-pull
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 0            # root group → the PVC (setgid) is writable by UID 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: shim
+          image: ghcr.io/crowdsalat/teddycloud-spotify-shim
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          env:
+            - name: TEDDYCLOUD_URL
+              value: http://teddycloud:80
+            - name: SOLOIST_DEVICE_NAME
+              value: teddycloud-spotify-shim
+            - name: LOG_LEVEL
+              value: info
+            - name: SOLOIST_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: soloist-api-key
+                  key: SOLOIST_API_KEY
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 30  # tolerate pair-first-boot
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 120 # /healthz 503s (soloist_missing) while pairing
+            periodSeconds: 30
+            failureThreshold: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 1
+              memory: 512Mi
+          volumeMounts:
+            - name: soloist-session-data
+              mountPath: /data   # SOLOIST_DATA_DIR
+            - name: cache
+              mountPath: /cache  # SOLOIST_CACHE_DIR
+      volumes:
+        - name: soloist-session-data
+          persistentVolumeClaim:
+            claimName: soloist-session-data
+        - name: cache
+          emptyDir: {}

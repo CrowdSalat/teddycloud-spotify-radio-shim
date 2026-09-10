@@ -5,6 +5,7 @@ GHCR_IMAGE ?= ghcr.io/crowdsalat/teddycloud-spotify-shim
 VERSION    ?= v0.1.0
 DATA_DIR  ?= $(CURDIR)/container/soloist-data/
 ENV_FILE  ?= $(CURDIR)/container/.env
+SOURCE_DIR ?= $(DATA_DIR)
 
 # Run flags shared across container targets.
 # --userns=keep-id + --user: session files land owned by the host user.
@@ -65,4 +66,12 @@ container-tag: GHCR_PUSH
 changelog:
 	git-cliff -o CHANGELOG.md
 
-.PHONY: build test lint container-build container-run container-push GHCR_PUSH container-push-ghcr container-tag changelog
+## Copy the local paired Soloist session into the OCP pod/PVC (TARGET_POD required).
+migrate-session:
+	./scripts/migrate-session.sh $(SOURCE_DIR) $(TARGET_POD)
+
+## Deploy the shim to OpenShift (requires oc).
+deploy-ocp:
+	oc apply -k container/ocp/
+
+.PHONY: build test lint container-build container-run container-push GHCR_PUSH container-push-ghcr container-tag changelog migrate-session deploy-ocp
