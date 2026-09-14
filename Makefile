@@ -4,6 +4,7 @@ IMAGE     ?= teddycloud-spotify-shim
 GHCR_IMAGE ?= ghcr.io/crowdsalat/teddycloud-spotify-shim
 VERSION    ?= v0.1.0
 DATA_DIR  ?= $(CURDIR)/container/soloist-data/
+CACHE_DIR ?= $(CURDIR)/container/soloist-cache/
 ENV_FILE  ?= $(CURDIR)/container/.env
 SOURCE_DIR ?= $(DATA_DIR)
 
@@ -12,7 +13,7 @@ SOURCE_DIR ?= $(DATA_DIR)
 # -v dir:/data:Z: SELinux relabel.
 RUN_OPTS := --rm --network host \
             --userns=keep-id --user $(shell id -u):$(shell id -g)
-VOL_OPTS := -v $(DATA_DIR):/data:Z
+VOL_OPTS := -v $(DATA_DIR):/data:Z -v $(CACHE_DIR):/cache:Z
 ENV_OPTS := --env-file $(ENV_FILE) -e TEDDYCLOUD_URL
 
 ## Build the shim binary.
@@ -29,11 +30,11 @@ lint:
 
 ## Build the container image locally (amd64, runnable with podman run).
 container-build:
-	@mkdir -p $(DATA_DIR)
+	@mkdir -p $(DATA_DIR) $(CACHE_DIR)
 	podman build --platform linux/amd64 -t $(IMAGE):dev -f Containerfile .
 
 ## Run the shim container locally.
-container-run: container-build
+container-run:
 	podman run $(RUN_OPTS) $(VOL_OPTS) $(ENV_OPTS) \
 		-p 8080:8080 \
 		$(IMAGE):dev
