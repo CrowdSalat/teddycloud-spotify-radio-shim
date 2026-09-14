@@ -192,6 +192,16 @@ Example messages:
 | Right ear slap | `skip_next` |
 | Left ear slap | `skip_prev` |
 
+### Volume — VERIFIED PROBLEM (2026-09-14, OCP pod)
+
+Observed live on the deployed OCP shim while playing "Falsche Schuld":
+
+- `playback_state` events carry `"volume":40` — Soloist restores its **persisted** volume (40/100) at startup.
+- The shim never sets volume: `Supervisor.args()` passes no `-i/--initial-volume`, and `VolumeLevel`/`VolumedB` SSE events from Teddycloud are debug-ignored (they describe box-local speaker level, not Soloist's output gain).
+- Because the recorded PCM is whatever Soloist decodes at its own volume, output is ~40 % amplitude → **super low playback volume** on the Toniebox, even with the sink at 100 % (pactl shows `virtual_out` and `virtual_out.monitor` both at 100 %, unmuted).
+
+**Implied fix:** after `activate`, send `{ "type":"command", "command":"set_volume", "volume":100 }` (or run Soloist with `--initial-volume 100`). The Toniebox keeps controlling the box speaker level independently (`VolumeLevel` remains box-local and ignorable for volume).
+
 ---
 
 ## CLI reference summary

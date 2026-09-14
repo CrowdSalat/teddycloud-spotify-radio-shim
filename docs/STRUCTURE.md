@@ -754,6 +754,67 @@ Final acceptance on the deployed pod:
 
 ---
 
+## Phase 12 — Playback quality: stop recorder audio drops (jumps)
+
+**Status: pending** — discovered on the deployed OCP pod 2026-09-14 (see [research/ocp-playback-issues.md](research/ocp-playback-issues.md)).
+
+**Goal:** a consumer that drains slower than real time must not cause audible gaps. Currently ~50 % of chunks are dropped because `PulseRecorder.pump` uses drop-on-full.
+
+### Context
+
+Recorder produces exactly real time (~43 chunks/s = 176400 B/s ÷ 4096 B). teddycloud's ffmpeg drains at `speed=0.47x`, so the 8-chunk (~186 ms) internal buffer fills and the non-blocking `default:` branch discards ~half the audio. The drop must stay off the pulse library's connection goroutine (a blocking send there stalls the native-protocol socket queues and wedges the whole connection — the original Phase 3b.1 constraint), but audio must not be silently discarded.
+
+### Tasks
+
+- Move the chunk queue off the pulse write callback: the pulse goroutine must only copy the inbound slice into a channel (`cap` = bus width), never block on it — but the buffer that backs `/stream` must not be the pulse goroutine's only exit.
+- Decide and implement one strategy for a full queue:
+  - **(A) Drain/resync:** when the consumer falls behind past a threshold, tear down the `/stream` response (or restart the WAV framing) and re-issue the `play` command so teddycloud resyncs, instead of emitting a jumpy stream. No silent drop.
+  - **(B) Larger staging buffer:** keep a bounded per-stream queue sized for a slow consumer (e.g. seconds not ms) and only then resort to (A).
+- Ensure chunk size stays frame-aligned (4 bytes/frame, s16le stereo) regardless of buffering changes.
+- Keep `/healthz` green; recorder must continue running independent of any HTTP client.
+
+### Verification
+
+```bash
+# on the OCP pod: recorder counters, produce/consume rates
+oc logs deployment/teddycloud-spotify-shim | grep -E "chunks|dropped"
+# → dropped stays ≈ 0 while playing; jumps gone on the Toniebox
+
+# local: simulate a slow consumer (throttled read), assert no silent chunk loss count
+go test ./internal/recorder/... -run SlowConsumer -v
+```
+
+---
+
+## Phase 13 — Playback quality: Soloist volume 100 at runtime
+
+**Status: pending** — discovered on the deployed OCP pod 2026-09-14 (see [research/ocp-playback-issues.md](research/ocp-playback-issues.md)).
+
+**Goal:** playback is not at ~40 % volume because Soloist restores its persisted volume at startup and the shim never sets it.
+
+### Context
+
+`playback_state` reports `"volume":40`. PulseAudio sink/monitor are at 100 %, unmuted — the attenuation is Soloist's own persisted volume. teddycloud's `VolumeLevel`/`VolumedB` are box-local and correct to ignore. Fix on the Soloist control path: `set_volume 100` after `activate`, and/or `-i/--initial-volume 100` at spawn.
+
+### Tasks
+
+- Add a volume command to `internal/soloist/connector.go` (with Play/Pause/SkipNext/SkipPrev): send `{"type":"command","command":"set_volume","volume":100}` (range 0–100, see research/spotify-soloist.md).
+- Call it after `activate` (in `Supervisor` or connector activation) so every Soloist start self-heals to 100 regardless of persisted state.
+- Optionally add `-i/--initial-volume 100` to `Supervisor.args()` as a second safety net, and/or a `SOLOIST_VOLUME` env (default `100`) for operator control.
+- Verify a `playback_state` `volume` of 100 appears in `/healthz`-adjacent status / logs after reconnect.
+- Keep `VolumeLevel`/`VolumedB` SSE ignored — they are box speaker level, not Soloist gain.
+
+### Verification
+
+```bash
+# OCP pod reconnect: volume self-heals without manual command
+oc logs deployment/teddycloud-spotify-shim | grep -E "volume|activate"
+# → set_volume 100 sent after activate; playback_state volume == 100
+# Toniebox audio no longer ~40 % amplitude; mean_volume rises toward -3..-6 dB
+```
+
+---
+
 ## Dependency graph
 
 ```
@@ -775,6 +836,9 @@ Phase 1  (skeleton + Containerfile)
 Phase 9 (session migration script) — independent, can run any time after Phase 2b has a paired session.
 Phase 11 (OpenShift manifests) — needs Phase 8 image + Phase 9 migration script.
                                     └── final acceptance: Phase 6 hardware tests + Phase 7 figurine swap on the deployed pod
+
+Phase 12 (stop recorder drops) — needs deployed OCP pod (Phase 11) for reproduction; recorder changes must respect the Phase 3b.1 pulse-goroutine constraint.
+Phase 13 (volume 100) — needs deployed OCP pod (Phase 11) for verification; independent of Phase 12.
 
 cmd/mock-teddycloud scaffolding can be started any time after Phase 1.
 ```
