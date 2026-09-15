@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 )
 
 // Config holds all runtime configuration for the shim.
@@ -22,6 +23,8 @@ type Config struct {
 	SoloistDeviceName string
 	// SoloistBin is an explicit path to the soloist binary. If empty, auto-discovery is used.
 	SoloistBin string
+	// SoloistVolume is the Soloist playback volume (0–100). Set via SOLOIST_VOLUME.
+	SoloistVolume int
 	// LogLevel controls log verbosity: debug, info, warn, error.
 	LogLevel string
 }
@@ -52,6 +55,12 @@ func Load() (*Config, error) {
 		missing = append(missing, "TEDDYCLOUD_URL")
 	}
 
+	vol, err := getenvInt("SOLOIST_VOLUME", 100)
+	if err != nil || vol < 0 || vol > 100 {
+		return nil, fmt.Errorf("SOLOIST_VOLUME must be 0–100, got %q", os.Getenv("SOLOIST_VOLUME"))
+	}
+	c.SoloistVolume = vol
+
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("missing required environment variables: %v", missing)
 	}
@@ -65,4 +74,13 @@ func getenv(key, fallback string) string {
 	}
 
 	return fallback
+}
+
+func getenvInt(key string, fallback int) (int, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback, nil
+	}
+
+	return strconv.Atoi(v)
 }

@@ -146,6 +146,112 @@ func TestSupervisor_ActivatesOnConnect(t *testing.T) {
 	})
 }
 
+func TestSupervisor_SetVolumeAfterActivate(t *testing.T) {
+	dir := t.TempDir()
+	port, activateCh, msgCh := startTestWSServer(t)
+
+	if err := os.WriteFile(filepath.Join(dir, "ws.port"), []byte(strconv.Itoa(port)), 0o644); err != nil {
+		t.Fatalf("write ws.port: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "ws.addr"), []byte("127.0.0.1"), 0o644); err != nil {
+		t.Fatalf("write ws.addr: %v", err)
+	}
+
+	m := &stubManager{procs: []*stubProcess{{wait: make(chan struct{})}}}
+	s := newSupervisor(dir, m, nil)
+	s.Volume = 100
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.Run(ctx)
+	}()
+
+	select {
+	case activate := <-activateCh:
+		if got, want := string(activate), `{"type":"command","command":"activate"}`; got != want {
+			t.Fatalf("activate: got %q, want %q", got, want)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for activate command")
+	}
+
+	select {
+	case msg := <-msgCh:
+		if got, want := string(msg), `{"type":"command","command":"set_volume","volume":100}`; got != want {
+			t.Fatalf("set_volume: got %q, want %q", got, want)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for set_volume command")
+	}
+
+	cancel()
+	waitFor(t, 2*time.Second, func() bool {
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
+	})
+}
+
+func TestSupervisor_InitialVolumeArg(t *testing.T) {
+	dir := t.TempDir()
+	port, _, msgCh := startTestWSServer(t)
+
+	if err := os.WriteFile(filepath.Join(dir, "ws.port"), []byte(strconv.Itoa(port)), 0o644); err != nil {
+		t.Fatalf("write ws.port: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "ws.addr"), []byte("127.0.0.1"), 0o644); err != nil {
+		t.Fatalf("write ws.addr: %v", err)
+	}
+
+	m := &stubManager{procs: []*stubProcess{{wait: make(chan struct{})}}}
+	s := newSupervisor(dir, m, nil)
+	s.Volume = 75
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.Run(ctx)
+	}()
+
+	// Drain the set_volume message.
+	select {
+	case <-msgCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for set_volume message")
+	}
+
+	m.mu.Lock()
+	args := m.lastArgs
+	m.mu.Unlock()
+
+	found := false
+	for i, a := range args {
+		if a == "--initial-volume" && i+1 < len(args) && args[i+1] == "75" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("args missing --initial-volume 75: %v", args)
+	}
+
+	cancel()
+	waitFor(t, 2*time.Second, func() bool {
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
+	})
+}
+
 func TestSupervisor_ExpiredNoRestart(t *testing.T) {
 	dir := t.TempDir()
 

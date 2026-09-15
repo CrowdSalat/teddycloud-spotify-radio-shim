@@ -88,3 +88,23 @@ func (c *CommandConnector) SkipNext() error {
 func (c *CommandConnector) SkipPrev() error {
 	return c.sendSimple("skip_prev")
 }
+
+type volumeCommand struct {
+	Type    string `json:"type"`
+	Command string `json:"command"`
+	Volume  int    `json:"volume"`
+}
+
+// SetVolume sets Soloist's playback volume (0–100).
+func (c *CommandConnector) SetVolume(volume int) error {
+	cmd, err := json.Marshal(volumeCommand{
+		Type:    "command",
+		Command: "set_volume",
+		Volume:  volume,
+	})
+	if err != nil {
+		return err
+	}
+
+	return c.write(cmd)
+}

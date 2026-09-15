@@ -185,6 +185,7 @@ func runSupervisor(ctx context.Context, srv *server.Server, cfg *config.Config, 
 		BinaryManager: bm,
 		Commands:      cc,
 		Health:        func(reason string) { srv.SetUnhealthy(reason) },
+		Volume:        cfg.SoloistVolume,
 	}
 
 	supervisor.Run(ctx)

@@ -788,7 +788,7 @@ go test ./internal/recorder/... -run SlowConsumer -v
 
 ## Phase 13 — Playback quality: Soloist volume 100 at runtime
 
-**Status: pending** — discovered on the deployed OCP pod 2026-09-14 (see [research/ocp-playback-issues.md](research/ocp-playback-issues.md)).
+**Status: done** — implemented (2026-09-15).
 
 **Goal:** playback is not at ~40 % volume because Soloist restores its persisted volume at startup and the shim never sets it.
 
@@ -857,5 +857,6 @@ All configuration via environment variables.
 | `SOLOIST_DATA_DIR` | No | `/data` | Soloist data + session directory. Mount PVC here. |
 | `SOLOIST_CACHE_DIR` | No | `/cache` | Soloist cache directory |
 | `SOLOIST_DEVICE_NAME` | No | `teddycloud-spotify-shim` | Spotify Connect device name |
+| `SOLOIST_VOLUME` | No | `100` | Soloist playback volume (0–100). Sent via `set_volume` after activate and as `--initial-volume` at spawn. |
 | `SOLOIST_BIN` | No | auto | Explicit path to soloist binary. Skips download if set. |
 | `LOG_LEVEL` | No | `info` | `debug`, `info`, `warn`, `error` |

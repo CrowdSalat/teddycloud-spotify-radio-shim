@@ -144,6 +144,9 @@ func TestCommandConnector_TransportCommands(t *testing.T) {
 	if err := cc.SkipPrev(); err == nil {
 		t.Fatal("SkipPrev before attach should fail")
 	}
+	if err := cc.SetVolume(50); err == nil {
+		t.Fatal("SetVolume before attach should fail")
+	}
 
 	dialer := websocket.Dialer{}
 	conn, _, err := dialer.Dial("ws://"+ln.Addr().String(), nil)
@@ -162,6 +165,7 @@ func TestCommandConnector_TransportCommands(t *testing.T) {
 		{"pause", `{"type":"command","command":"pause"}`, cc.Pause},
 		{"skip_next", `{"type":"command","command":"skip_next"}`, cc.SkipNext},
 		{"skip_prev", `{"type":"command","command":"skip_prev"}`, cc.SkipPrev},
+		{"set_volume", `{"type":"command","command":"set_volume","volume":100}`, func() error { return cc.SetVolume(100) }},
 	}
 
 	for _, c := range commands {

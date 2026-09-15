@@ -2,11 +2,13 @@ package soloist
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -63,6 +65,9 @@ type Supervisor struct {
 	// Commands serialises WebSocket command writes for concurrent callers.
 	// Nil keeps today's inline-activate behaviour unchanged.
 	Commands *CommandConnector
+	// Volume is the Soloist playback volume (0–100) sent after activate.
+	// Negative or zero skips the set_volume command.
+	Volume int
 }
 
 // Run supervises Soloist until ctx is cancelled or the binary is expired.
@@ -176,6 +181,10 @@ func (s *Supervisor) runOnce(ctx context.Context, dialBackoff time.Duration) (st
 
 		slog.Info("soloist ws: connected, activated")
 		s.setHealth("")
+
+		if err := s.writeSetVolume(conn); err != nil {
+			slog.Warn("soloist ws: set_volume send failed", "err", err)
+		}
 
 		consumeErr := s.wsConsume(ctx, conn)
 		if s.Commands != nil {
@@ -303,15 +312,42 @@ func (s *Supervisor) writeActivate(conn *websocket.Conn) error {
 	return conn.WriteMessage(websocket.TextMessage, []byte(activateCommand))
 }
 
+func (s *Supervisor) writeSetVolume(conn *websocket.Conn) error {
+	if s.Volume <= 0 {
+		return nil
+	}
+
+	msg, err := json.Marshal(volumeCommand{
+		Type:    "command",
+		Command: "set_volume",
+		Volume:  s.Volume,
+	})
+	if err != nil {
+		return err
+	}
+
+	if s.Commands != nil {
+		return s.Commands.write(msg)
+	}
+
+	return conn.WriteMessage(websocket.TextMessage, msg)
+}
+
 // args returns the Soloist Connect-mode command line.
 func (s *Supervisor) args() []string {
-	return []string{
+	args := []string{
 		"--device-name", s.DeviceName,
 		"--api-key", s.APIKey,
 		"--data-dir", s.DataDir,
 		"--cache-dir", s.CacheDir,
 		"--ws", "127.0.0.1:0",
 	}
+
+	if s.Volume > 0 {
+		args = append(args, "--initial-volume", strconv.Itoa(s.Volume))
+	}
+
+	return args
 }
 
 func (s *Supervisor) dial(ctx context.Context, wsURL string) (*websocket.Conn, error) {
