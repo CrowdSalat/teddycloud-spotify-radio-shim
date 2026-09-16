@@ -52,6 +52,49 @@ Recorded as Phase 12 task.
 
 ---
 
+## 1b. Follow-up measurement (2026-09-16): the consumer pace is the HTTP presentation
+
+Re-measured on the deployed pod after the Phase 3b.2 non-blocking recorder fix
+(shim image `v0.1.3`, pipeline telemetry `LOG_LEVEL=debug`), playing a Spotify
+tonie. The drop persists, now measured on both sides:
+
+- Shim telemetry (`pipeline: util`, 10 s intervals):
+  `chunks_s≈17–21 dropped_s≈20–25 drop_ratio≈0.49–0.60 delivered_kB_s≈68–87
+  streams=1` — the `/stream` connection is open and the recorder produces
+  exactly real time (~43 chunks/s ⇒ 176400 B/s). The shim only ever *delivers*
+  what ffmpeg pulls.
+- teddycloud ffmpeg: `size=12491kB time=00:01:06.64 bitrate=1535.5kbits/s
+  speed=0.475x` — a steady drain at ~47.5 % real time.
+- Cross-check: `176400 B/s × 0.475 ≈ 83790 B/s ≈ 84 kB/s`
+  (observed `delivered_kB_s≈68–87`). All three numbers agree to within jitter:
+  `drop_ratio` is *entirely explained by* ffmpeg's read pace.
+- Control: a **radio tonie** on the same box, same ffmpeg path, plays at
+  `speed=1.11x` — teddycloud's engine and the box hardware have ample headroom.
+
+### Revised root cause (2026-09-16)
+
+The 0.47x is **not** a decode-cost problem (the ffmpeg chain is a pure s16le
+48 kHz-stereo passthrough, no transcode) and **not** an upstream teddycloud bug
+(radio content plays real-time through the identical code path). It is a
+property of how the shim presents the stream: a raw WAV body written as
+4096-byte payloads every ~23 ms over chunked HTTP with no `Content-Length`.
+Tiny per-segment writes trip client-side delayed-ACK coalescing, halving the
+effective segment rate (0.475x ≈ one packet every other ~23 ms cadence window),
+while the box's own content arrives as larger, burstier mp3 blobs and streams
+at 1.1x.
+
+### Decisions
+
+- **No teddycloud fork, no upstream PR.** There is no general capability missing;
+  teddycloud+box play real-time when fed normal-bodied streams. Upstream "works
+  for everyone" precisely because it is fed well-formed audio.
+- **Fix belongs in the shim** (Phase 12): batch `/stream` writes into ≥16 KB
+  segments (~4–8 chunks per flush) instead of per-chunk drips, so the client
+  sees fewer, ACK-friendly segments. Keep frame alignment (chunk size is already
+  a multiple of the s16le 48k-stereo frame) and keep the recorder non-blocking.
+
+---
+
 ## 2. Very low volume: Soloist persisted volume 40
 
 ### Evidence

@@ -756,32 +756,47 @@ Final acceptance on the deployed pod:
 
 ## Phase 12 — Playback quality: stop recorder audio drops (jumps)
 
-**Status: pending** — discovered on the deployed OCP pod 2026-09-14 (see [research/ocp-playback-issues.md](research/ocp-playback-issues.md)).
+**Status: in progress** — root cause revised on 2026-09-16 (see
+[research/ocp-playback-issues.md](research/ocp-playback-issues.md) §1b).
 
-**Goal:** a consumer that drains slower than real time must not cause audible gaps. Currently ~50 % of chunks are dropped because `PulseRecorder.pump` uses drop-on-full.
+**Goal:** a raw-WAV `/stream` that teddycloud's ffmpeg can drain at real time,
+so the recorder's drop-on-full safety valve stops dropping audio.
 
 ### Context
 
-Recorder produces exactly real time (~43 chunks/s = 176400 B/s ÷ 4096 B). teddycloud's ffmpeg drains at `speed=0.47x`, so the 8-chunk (~186 ms) internal buffer fills and the non-blocking `default:` branch discards ~half the audio. The drop must stay off the pulse library's connection goroutine (a blocking send there stalls the native-protocol socket queues and wedges the whole connection — the original Phase 3b.1 constraint), but audio must not be silently discarded.
+Recorder produces exactly real time (~43 chunks/s = 176400 B/s ÷ 4096 B).
+teddycloud's ffmpeg drained at ~0.47x and the 8-chunk (~186 ms) internal buffer
+filled, so the non-blocking `default:` branch discarded ~half the audio. The
+2026-09-16 measurement (pipeline telemetry + radio control) shows the 0.47x is a
+*client-side artifact of the tiny per-chunk HTTP writes* (delayed-ACK segment
+coalescing), not an upstream deficiency: the same box plays radio at 1.11x via
+the identical ffmpeg code path. The drop must stay off the pulse library's
+connection goroutine (a blocking send there stalls the native-protocol socket
+queues and wedges the whole connection — the original Phase 3b.1 constraint),
+but the consumer's read pace must become real time.
 
 ### Tasks
 
-- Move the chunk queue off the pulse write callback: the pulse goroutine must only copy the inbound slice into a channel (`cap` = bus width), never block on it — but the buffer that backs `/stream` must not be the pulse goroutine's only exit.
-- Decide and implement one strategy for a full queue:
-  - **(A) Drain/resync:** when the consumer falls behind past a threshold, tear down the `/stream` response (or restart the WAV framing) and re-issue the `play` command so teddycloud resyncs, instead of emitting a jumpy stream. No silent drop.
-  - **(B) Larger staging buffer:** keep a bounded per-stream queue sized for a slow consumer (e.g. seconds not ms) and only then resort to (A).
-- Ensure chunk size stays frame-aligned (4 bytes/frame, s16le stereo) regardless of buffering changes.
-- Keep `/healthz` green; recorder must continue running independent of any HTTP client.
+- Batch `/stream` body writes in `handleStream`: accumulate chunks and flush
+  segments of ≥16 KB (~4–8 chunks ≈ 92–190 ms) instead of one `Write` per
+  4096-byte chunk, so the client receives few, larger, ACK-friendly segments.
+- Keep chunk size frame-aligned (4096 B is a multiple of the 4 B s16le-stereo
+  frame) and the recorder drop-on-full as-is (now reachable only if the client
+  truly stalls).
+- Add the correct `Content-Type: audio/wav` header; keep `/healthz` green and
+  the recorder independent of any HTTP client.
+- Keep the `pipeline: util` telemetry line as the acceptance instrument.
 
 ### Verification
 
 ```bash
-# on the OCP pod: recorder counters, produce/consume rates
-oc logs deployment/teddycloud-spotify-shim | grep -E "chunks|dropped"
-# → dropped stays ≈ 0 while playing; jumps gone on the Toniebox
+# on the OCP pod: recorder counters, deliver rate should track 176400 B/s real time
+oc logs -l app=teddycloud-spotify-shim -n app-teddycloud | grep -E "pipeline:|chunks"
+# → dropped ≈ 0 and delivered ≈ 176400 B/s (172.3 kB/s) while playing; jumps gone on the Toniebox
+# → teddycloud ffmpeg speed ≈ 1.0x on a Spotify tonie
 
-# local: simulate a slow consumer (throttled read), assert no silent chunk loss count
-go test ./internal/recorder/... -run SlowConsumer -v
+# local: the stream writes occur in batched segments, not per chunk
+go test ./internal/server/... -run TestStreamCounters -v
 ```
 
 ---

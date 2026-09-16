@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/binary"
 	"io"
 	"net/http"
@@ -201,7 +202,7 @@ func TestStream_HotSwap(t *testing.T) {
 			default:
 			}
 			select {
-			case ch <- []byte("audio"):
+			case ch <- make([]byte, 4096):
 			case <-stop:
 				return
 			}
@@ -252,5 +253,70 @@ func TestStream_HotSwap(t *testing.T) {
 	}
 	if plays[1] != "spotify:album:BBB" {
 		t.Errorf("play[1]: got %q, want %q", plays[1], "spotify:album:BBB")
+	}
+}
+
+// writeRecorder captures the size of every Write call so tests can
+// observe HTTP write segmentation.
+type writeRecorder struct {
+	writes []int
+}
+
+func (wr *writeRecorder) Write(p []byte) (int, error) {
+	wr.writes = append(wr.writes, len(p))
+	return len(p), nil
+}
+
+func TestStreamBatching(t *testing.T) {
+	const chunkSize = 4096
+	const numChunks = 8
+
+	ch := make(chan []byte, numChunks)
+	for i := 0; i < numChunks; i++ {
+		ch <- make([]byte, chunkSize)
+	}
+	close(ch)
+
+	rec := &writeRecorder{}
+	total := streamChunks(context.Background(), rec, ch, streamFlushThreshold)
+
+	want := uint64(numChunks * chunkSize)
+	if total != want {
+		t.Errorf("streamChunks bytes: got %d, want %d", total, want)
+	}
+
+	// 8 × 4096 = 32768 bytes with a 16384 threshold flushes as exactly
+	// two full-size segments before the final flush.
+	if len(rec.writes) == 0 {
+		t.Fatal("no writes observed")
+	}
+	for i, n := range rec.writes {
+		if n < streamFlushThreshold {
+			t.Errorf("write[%d]: %d bytes < %d threshold", i, n, streamFlushThreshold)
+		}
+	}
+}
+
+func TestStreamBatchedBody(t *testing.T) {
+	const chunkSize = 4096
+	const numChunks = 8
+
+	chunks := make([][]byte, numChunks)
+	for i := range chunks {
+		chunks[i] = make([]byte, chunkSize)
+	}
+	fake := newFakeChunkSource(chunks...)
+	s := New("localhost:0", func() ChunkSource { return fake }, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/stream?spotify_uri=spotify:album:BAT", nil)
+	rec := httptest.NewRecorder()
+	s.handleStream(rec, req)
+
+	want := uint64(44 + numChunks*chunkSize)
+	if got := uint64(rec.Body.Len()); got != want {
+		t.Errorf("body length: got %d, want %d (WAV header + payload)", got, want)
+	}
+	if got := s.DeliveredBytes(); got != want {
+		t.Errorf("DeliveredBytes(): got %d, want %d (WAV header + payload)", got, want)
 	}
 }

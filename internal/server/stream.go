@@ -1,9 +1,11 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"regexp"
@@ -67,17 +69,32 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	flush(w)
 
 	ch := src.Chunks()
+	s.delivered.Add(streamChunks(ctx, w, ch, streamFlushThreshold))
+}
+
+// streamFlushThreshold is the minimum batch size for HTTP writes.
+// 16 KiB (4–8 chunks) avoids delayed-ACK coalescing that starves
+// ffmpeg at small segment sizes.
+const streamFlushThreshold = 16384
+
+// streamChunks writes audio chunks to w using batched writes of at
+// least flushThreshold bytes. It returns the total chunk bytes written.
+func streamChunks(ctx context.Context, w io.Writer, ch <-chan []byte, flushThreshold int) uint64 {
+	bw := bufio.NewWriterSize(w, flushThreshold)
+	var delivered uint64
+
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			_ = bw.Flush()
+			return delivered
 		case chunk, ok := <-ch:
 			if !ok {
-				return
+				_ = bw.Flush()
+				return delivered
 			}
-			n, _ := w.Write(chunk)
-			s.delivered.Add(uint64(n))
-			flush(w)
+			n, _ := bw.Write(chunk)
+			delivered += uint64(n)
 		}
 	}
 }
