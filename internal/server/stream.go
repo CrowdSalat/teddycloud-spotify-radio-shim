@@ -10,8 +10,6 @@ import (
 	"net/http"
 	"regexp"
 	"sync/atomic"
-
-	"github.com/crowdsalat/teddycloud-spotify-radio-shim/internal/audio"
 )
 
 var validURI = regexp.MustCompile(`^spotify:(track|album|playlist|episode):[A-Za-z0-9]+$`)
@@ -39,6 +37,13 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
+	// Stop per-request generator sources (static stream) once the HTTP
+	// connection ends, so the synthesizer goroutine does not leak on
+	// disconnect or hot-swap.
+	if closer, ok := src.(interface{ Close() }); ok {
+		defer closer.Close()
+	}
+
 	s.streamMu.Lock()
 	if s.streamCancel != nil {
 		s.streamCancel()
@@ -64,7 +69,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "audio/wav")
 	w.WriteHeader(http.StatusOK)
-	header := writeWAVHeader()
+	header := writeWAVHeader(src.SampleRate())
 	_, _ = w.Write(header)
 	s.delivered.Add(uint64(len(header)))
 	s.active.Add(1)
@@ -103,7 +108,7 @@ func streamChunks(ctx context.Context, w io.Writer, delivered *atomic.Uint64, ch
 	}
 }
 
-func writeWAVHeader() []byte {
+func writeWAVHeader(sampleRate uint32) []byte {
 	h := make([]byte, 44)
 
 	copy(h[0:4], "RIFF")
@@ -114,8 +119,8 @@ func writeWAVHeader() []byte {
 	binary.LittleEndian.PutUint32(h[16:20], 16)
 	binary.LittleEndian.PutUint16(h[20:22], 1)
 	binary.LittleEndian.PutUint16(h[22:24], 2)
-	binary.LittleEndian.PutUint32(h[24:28], audio.SampleRate)
-	binary.LittleEndian.PutUint32(h[28:32], audio.ByteRate())
+	binary.LittleEndian.PutUint32(h[24:28], sampleRate)
+	binary.LittleEndian.PutUint32(h[28:32], sampleRate*2*2)
 	binary.LittleEndian.PutUint16(h[32:34], 4)
 	binary.LittleEndian.PutUint16(h[34:36], 16)
 

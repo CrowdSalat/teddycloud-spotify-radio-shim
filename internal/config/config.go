@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 )
 
 // Config holds all runtime configuration for the shim.
@@ -27,6 +28,11 @@ type Config struct {
 	SoloistVolume int
 	// LogLevel controls log verbosity: debug, info, warn, error.
 	LogLevel string
+	// StaticStream forces /stream to serve a synthesized WAV instead of the
+	// live recorder, for the Phase 12 static-file ingest test.
+	StaticStream bool
+	// StaticSampleRate is the sample rate of the synthesized static stream.
+	StaticSampleRate uint32
 }
 
 // Load reads configuration from environment variables.
@@ -61,6 +67,14 @@ func Load() (*Config, error) {
 	}
 	c.SoloistVolume = vol
 
+	c.StaticStream = getenvBool("STATIC_STREAM")
+
+	sr, err := getenvInt("STATIC_SAMPLE_RATE", 22050)
+	if err != nil || sr < 8000 || sr > 96000 {
+		return nil, fmt.Errorf("STATIC_SAMPLE_RATE must be 8000–96000, got %q", os.Getenv("STATIC_SAMPLE_RATE"))
+	}
+	c.StaticSampleRate = uint32(sr)
+
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("missing required environment variables: %v", missing)
 	}
@@ -83,4 +97,13 @@ func getenvInt(key string, fallback int) (int, error) {
 	}
 
 	return strconv.Atoi(v)
+}
+
+func getenvBool(key string) bool {
+	switch strings.ToLower(os.Getenv(key)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }

@@ -51,17 +51,17 @@ type recorderMetrics interface {
 // recorder is recreated per reconnect, so the source changes over time.
 type recorderSlot struct {
 	mu  sync.Mutex
-	src audio.ChunkSource
+	src server.ChunkSource
 }
 
-func (r *recorderSlot) get() audio.ChunkSource {
+func (r *recorderSlot) get() server.ChunkSource {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	return r.src
 }
 
-func (r *recorderSlot) set(src audio.ChunkSource) {
+func (r *recorderSlot) set(src server.ChunkSource) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -95,7 +95,17 @@ func main() {
 
 	slot := &recorderSlot{}
 	cc := &soloist.CommandConnector{}
-	srv := server.New(cfg.ListenAddr, func() server.ChunkSource { return slot.get() }, cc.Play)
+	if cfg.StaticStream {
+		slog.Warn("STATIC_STREAM enabled — /stream serves a synthesized tone for ingest testing",
+			"sample_rate", cfg.StaticSampleRate)
+	}
+	srcFunc := func() server.ChunkSource {
+		if cfg.StaticStream {
+			return server.NewStaticSource(cfg.StaticSampleRate)
+		}
+		return slot.get()
+	}
+	srv := server.New(cfg.ListenAddr, srcFunc, cc.Play)
 
 	// Phase 3a: PulseAudio daemon + virtual sink. SetupEnv runs synchronously so
 	// every later subprocess (Soloist, pactl) inherits HOME and XDG_RUNTIME_DIR.

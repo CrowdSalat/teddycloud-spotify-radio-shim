@@ -104,6 +104,12 @@ func (p *PulseRecorder) ChunksSent() uint64 {
 	return p.chunksSent.Load()
 }
 
+// SampleRate reports the capture rate of the PCM source, matching the
+// null sink the AudioDaemon loads (audio.SampleRate).
+func (p *PulseRecorder) SampleRate() uint32 {
+	return SampleRate
+}
+
 // Dropped returns the number of chunks dropped due to a full channel.
 func (p *PulseRecorder) Dropped() uint64 {
 	return p.dropped.Load()

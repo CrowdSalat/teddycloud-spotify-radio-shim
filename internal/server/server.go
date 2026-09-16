@@ -9,9 +9,11 @@ import (
 	"sync/atomic"
 )
 
-// ChunkSource yields PCM chunks for /stream consumers.
+// ChunkSource yields PCM chunks for /stream consumers. SampleRate reports the
+// sample rate of the chunks so the WAV header always matches the payload.
 type ChunkSource interface {
 	Chunks() <-chan []byte
+	SampleRate() uint32
 }
 
 // Server is the shim HTTP server.

@@ -13,11 +13,20 @@ import (
 )
 
 type fakeChunkSource struct {
-	ch chan []byte
+	ch   chan []byte
+	rate uint32
 }
 
 func (f *fakeChunkSource) Chunks() <-chan []byte {
 	return f.ch
+}
+
+func (f *fakeChunkSource) SampleRate() uint32 {
+	if f.rate > 0 {
+		return f.rate
+	}
+
+	return 22050
 }
 
 func newFakeChunkSource(chunks ...[]byte) *fakeChunkSource {
