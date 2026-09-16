@@ -1,0 +1,4 @@
+[tools]
+go = "1.26.4"
+"golangci-lint" = "2.13.2"
+"git-cliff" = "latest"
