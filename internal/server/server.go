@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 )
 
 // ChunkSource yields PCM chunks for /stream consumers.
@@ -27,6 +28,11 @@ type Server struct {
 	streamMu     sync.Mutex
 	streamID     int64
 	streamCancel context.CancelFunc
+
+	// delivered counts payload bytes written to /stream consumers, for
+	// telemetry. Active counts currently open /stream connections.
+	delivered atomic.Uint64
+	active    atomic.Int64
 }
 
 // New creates a new Server listening on addr.
@@ -51,6 +57,13 @@ func (s *Server) SetUnhealthy(reason string) {
 	s.unhealthyReason = reason
 	s.mu.Unlock()
 }
+
+// DeliveredBytes returns the cumulative payload bytes written to /stream
+// consumers, for telemetry purposes.
+func (s *Server) DeliveredBytes() uint64 { return s.delivered.Load() }
+
+// ActiveStreams returns the number of /stream connections currently open.
+func (s *Server) ActiveStreams() int64 { return s.active.Load() }
 
 // Run starts the HTTP server and blocks until ctx is cancelled.
 func (s *Server) Run(ctx context.Context) error {

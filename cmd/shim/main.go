@@ -19,6 +19,7 @@ import (
 	"github.com/crowdsalat/teddycloud-spotify-radio-shim/internal/server"
 	"github.com/crowdsalat/teddycloud-spotify-radio-shim/internal/soloist"
 	"github.com/crowdsalat/teddycloud-spotify-radio-shim/internal/sselistener"
+	"github.com/crowdsalat/teddycloud-spotify-radio-shim/internal/telemetry"
 )
 
 const (
@@ -34,10 +35,17 @@ const (
 	// daemon to become ready and retries a failed monitor connect.
 	monitorPollInterval = 250 * time.Millisecond
 
-	// recorderSummaryInterval is how often a live recording logs its
-	// chunk/drop counters (debug level).
-	recorderSummaryInterval = 10 * time.Second
+	// telemetryInterval is how often the pipeline rate sampler logs its
+	// chunk/drop/delivery counters (debug level).
+	telemetryInterval = 10 * time.Second
 )
+
+// recorderMetrics are the cumulative counters of a live recorder. Consumers of
+// stream audio go through audio.ChunkSource; counters are the telemetry side.
+type recorderMetrics interface {
+	ChunksSent() uint64
+	Dropped() uint64
+}
 
 // recorderSlot holds the current live recorder for /stream consumers. The
 // recorder is recreated per reconnect, so the source changes over time.
@@ -58,6 +66,19 @@ func (r *recorderSlot) set(src audio.ChunkSource) {
 	defer r.mu.Unlock()
 
 	r.src = src
+}
+
+// metrics returns the current recorder's counters, or nil if no recorder is
+// active.
+func (r *recorderSlot) metrics() recorderMetrics {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if rec, ok := r.src.(recorderMetrics); ok {
+		return rec
+	}
+
+	return nil
 }
 
 func main() {
@@ -94,6 +115,10 @@ func main() {
 	// branch below: audio flows even while the Soloist session is missing or
 	// unpaired.
 	go runRecorder(ctx, pa, slot)
+
+	// Phase 12 measurement: sample recorder and /stream counters into rate
+	// telemetry independent of HTTP clients.
+	go runTelemetry(ctx, slot, srv)
 
 	// Phase 5: Teddycloud SSE listener. Independent of pairing: events are
 	// translated into WebSocket commands which fail harmlessly ("not
@@ -134,6 +159,45 @@ func main() {
 		slog.Error("server error", "err", err)
 		os.Exit(1)
 	}
+}
+
+// runTelemetry samples the recorder and /stream counters every interval and
+// logs per-interval rates. A single line distinguishes a producer that keeps
+// up from a consumer that falls behind, and a stalled stream from a dead
+// recorder. It runs independently of any HTTP client.
+func runTelemetry(ctx context.Context, slot *recorderSlot, srv *server.Server) {
+	tick := time.NewTicker(telemetryInterval)
+	defer tick.Stop()
+
+	sampler := &telemetry.Sampler{}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-tick.C:
+			snap := telemetry.Snapshot{
+				Delivered: srv.DeliveredBytes(),
+				Streams:   srv.ActiveStreams(),
+			}
+			if rec := slot.metrics(); rec != nil {
+				snap.Chunks = rec.ChunksSent()
+				snap.Dropped = rec.Dropped()
+			}
+			logTelemetry(sampler.Sample(now, snap))
+		}
+	}
+}
+
+// logTelemetry renders a telemetry summary as a compact debug line. Chunk
+// production is 4096 B per chunk, so the theoretical capture rate is ~43
+// chunks/s (176400 B/s). DropRatio is the fraction of captured audio lost.
+func logTelemetry(s telemetry.Summary) {
+	slog.Debug("pipeline: util",
+		"chunks_s", fmt.Sprintf("%.1f", s.ChunksPerSec),
+		"dropped_s", fmt.Sprintf("%.1f", s.DroppedPerSec),
+		"drop_ratio", fmt.Sprintf("%.2f", s.DropRatio),
+		"delivered_kB_s", fmt.Sprintf("%.1f", s.DeliveredKiBps),
+		"streams", s.Streams)
 }
 
 // runSseListener subscribes to the Teddycloud SSE stream and translates events
@@ -230,24 +294,6 @@ func runRecorder(ctx context.Context, pa *audio.PulseAudio, slot *recorderSlot) 
 			slog.Info("recorder: reconnected to virtual_out.monitor", "attempt", attempt)
 		}
 
-		// Periodic debug summary distinguishes a live but silent recording
-		// from a dead pump.
-		summaryDone := make(chan struct{})
-		go func() {
-			ticker := time.NewTicker(recorderSummaryInterval)
-			defer ticker.Stop()
-
-			for {
-				select {
-				case <-summaryDone:
-					return
-				case <-ticker.C:
-					slog.Debug("recorder: live",
-						"chunks", rec.ChunksSent(), "dropped", rec.Dropped())
-				}
-			}
-		}()
-
 		// The pump can block in Read while the daemon is down: the monitor
 		// stream marks the connection serverLost but never reports it to the
 		// pipe, so rec.Done() alone won't fire. Watch daemon liveness and force
@@ -275,8 +321,6 @@ func runRecorder(ctx context.Context, pa *audio.PulseAudio, slot *recorderSlot) 
 
 		select {
 		case <-ctx.Done():
-			close(summaryDone)
-			close(lostDone)
 			rec.Stop()
 			stream.Close()
 			slot.set(nil)
@@ -285,7 +329,6 @@ func runRecorder(ctx context.Context, pa *audio.PulseAudio, slot *recorderSlot) 
 		case <-rec.Done():
 			// Pump ended: the connection died (possibly forced by the watchdog
 			// above) or the source failed. Stop and close before reconnecting.
-			close(summaryDone)
 			close(lostDone)
 			rec.Stop()
 			stream.Close()

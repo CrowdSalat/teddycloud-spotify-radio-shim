@@ -59,7 +59,11 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "audio/wav")
 	w.WriteHeader(http.StatusOK)
-	writeWAVHeader(w)
+	header := writeWAVHeader()
+	_, _ = w.Write(header)
+	s.delivered.Add(uint64(len(header)))
+	s.active.Add(1)
+	defer s.active.Add(-1)
 	flush(w)
 
 	ch := src.Chunks()
@@ -71,13 +75,14 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			_, _ = w.Write(chunk)
+			n, _ := w.Write(chunk)
+			s.delivered.Add(uint64(n))
 			flush(w)
 		}
 	}
 }
 
-func writeWAVHeader(w http.ResponseWriter) {
+func writeWAVHeader() []byte {
 	h := make([]byte, 44)
 
 	copy(h[0:4], "RIFF")
@@ -96,7 +101,7 @@ func writeWAVHeader(w http.ResponseWriter) {
 	copy(h[36:40], "data")
 	binary.LittleEndian.PutUint32(h[40:44], 0xFFFFFFFF)
 
-	_, _ = w.Write(h)
+	return h
 }
 
 func flush(w http.ResponseWriter) {

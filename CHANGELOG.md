@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [unreleased]
 
+### Features
+
+- *(telemetry)* Add pipeline rate sampler: chunk/drop/delivery counters
+
 ### Bug Fixes
 
 - *(ocp)* Point ExternalSecret at Infisical store, match cluster template

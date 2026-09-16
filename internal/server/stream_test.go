@@ -157,6 +157,23 @@ func TestStream_PlayCalled(t *testing.T) {
 	}
 }
 
+func TestStreamCounters(t *testing.T) {
+	fake := newFakeChunkSource([]byte("chunk1"), []byte("chunk2"))
+	s := New("localhost:0", func() ChunkSource { return fake }, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/stream?spotify_uri=spotify:album:CNT", nil)
+	rec := httptest.NewRecorder()
+	s.handleStream(rec, req)
+
+	if s.ActiveStreams() != 0 {
+		t.Errorf("ActiveStreams() = %d after handler returned, want 0", s.ActiveStreams())
+	}
+	wantDelivered := uint64(44 + len("chunk1") + len("chunk2"))
+	if got := s.DeliveredBytes(); got != wantDelivered {
+		t.Errorf("DeliveredBytes() = %d, want %d (WAV header + payload)", got, wantDelivered)
+	}
+}
+
 func TestStream_HotSwap(t *testing.T) {
 	ch := make(chan []byte, 1024)
 	var plays []string
