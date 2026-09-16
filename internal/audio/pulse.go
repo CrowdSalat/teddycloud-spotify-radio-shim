@@ -417,7 +417,7 @@ func (p *PulseAudio) daemonArgs() []string {
 		"--exit-idle-time=-1",
 		"-n",
 		"--load=module-native-protocol-unix",
-		fmt.Sprintf("--load=module-null-sink sink_name=%s rate=44100 channels=2 sink_properties=device.description=%s", SinkName, sinkDeviceDesc),
+		fmt.Sprintf("--load=module-null-sink sink_name=%s rate=%d channels=2 sink_properties=device.description=%s", SinkName, SampleRate, sinkDeviceDesc),
 		"--daemonize=yes",
 		"--log-target=stderr",
 	}

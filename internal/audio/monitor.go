@@ -10,13 +10,9 @@ import (
 	"github.com/jfreymuth/pulse/proto"
 )
 
-// monitorSampleRate is the record format shared with PulseRecorder: s16le at
-// 44100 Hz, stereo (4 bytes/frame).
-const monitorSampleRate = 44100
-
 // monitorStream turns a live PulseAudio monitor recording of SinkName into an
-// io.Reader. PCM is delivered already shaped as s16le, 44100 Hz, stereo, so
-// PulseRecorder can consume it without client-side resampling.
+// io.Reader. PCM is delivered already shaped as s16le, SampleRate Hz, stereo,
+// so PulseRecorder can consume it without client-side resampling.
 type monitorStream struct {
 	client *pulse.Client
 	rec    *pulse.RecordStream
@@ -28,8 +24,8 @@ type monitorStream struct {
 
 // OpenMonitorStream connects to the PulseAudio server at server (a native
 // protocol server string) and opens a monitor recording from the SinkName
-// sink. The returned ReadCloser yields s16le, 44100 Hz, stereo PCM; Close stops
-// the recording and releases the connection. Errors distinguish connect,
+// sink. The returned ReadCloser yields s16le, SampleRate Hz, stereo PCM; Close
+// stops the recording and releases the connection. Errors distinguish connect,
 // sink-lookup, and record-setup failures for caller reconnection logic.
 func OpenMonitorStream(ctx context.Context, server string) (io.ReadCloser, error) {
 	if err := ctx.Err(); err != nil {
@@ -60,7 +56,7 @@ func OpenMonitorStream(ctx context.Context, server string) (io.ReadCloser, error
 		pulse.NewWriter(writer, proto.FormatInt16LE),
 		pulse.RecordMonitor(sink),
 		pulse.RecordStereo,
-		pulse.RecordSampleRate(monitorSampleRate),
+		pulse.RecordSampleRate(SampleRate),
 	)
 	if err != nil {
 		_ = writer.Close()

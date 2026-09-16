@@ -189,8 +189,9 @@ func runTelemetry(ctx context.Context, slot *recorderSlot, srv *server.Server) {
 }
 
 // logTelemetry renders a telemetry summary as a compact debug line. Chunk
-// production is 4096 B per chunk, so the theoretical capture rate is ~43
-// chunks/s (176400 B/s). DropRatio is the fraction of captured audio lost.
+// production is 4096 B per chunk at audio.SampleRate (22050 Hz), so the
+// capture rate is ~21.5 chunks/s (88200 B/s). DropRatio is the fraction of
+// produced audio discarded.
 func logTelemetry(s telemetry.Summary) {
 	slog.Debug("pipeline: util",
 		"chunks_s", fmt.Sprintf("%.1f", s.ChunksPerSec),

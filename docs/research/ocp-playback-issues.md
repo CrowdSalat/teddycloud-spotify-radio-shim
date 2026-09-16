@@ -95,6 +95,32 @@ at 1.1x.
 
 ---
 
+## 1c. Segment-size plateau → sample-rate reduction (2026-09-16, v0.1.4–v0.1.5)
+
+Re-measured with 128 KiB batching (v0.1.5) after raising the 16 KiB threshold:
+
+| version | segment size | ffmpeg speed | drop_ratio |
+|---------|-------------|--------------|-----------|
+| v0.1.3 | 4 KiB | 0.475x | ~0.50 |
+| v0.1.4 | 16 KiB | 0.73x | ~0.29 |
+| v0.1.5 | 128 KiB | 0.77x | ~0.26 |
+
+Diminishing returns: going 4 → 16 KiB gained 0.26x, 16 → 128 KiB gained only
+0.04x. The consumer is not segment-overhead-bound but runs at an absolute HTTP
+read ceiling of ~136 kB/s, i.e. ~77 % of the 176400 B/s the 44100 Hz stream
+demanded. The station-box plays local content at 1.11x, so the engine and the
+hardware are fine — the deficit is exclusive to the HTTP feed.
+
+**Decision (no upstream change, no fork):** halve the capture rate instead of
+raising segment size further. The monitor, the null sink and the WAV header all
+use `audio.SampleRate = 22050`, cutting the byte rate to 88200 B/s — below the
+measured ceiling, so the recorder's drop-on-full valve goes silent. Speech
+content (Die drei ???) keeps full clarity; teddycloud anyway upsamples to
+`-ar 48000 -ac 2` for playback. Expected: `drop_ratio ≈ 0`, `delivered ≈
+86 kB/s`, ffmpeg `speed ≥ 1.0x`.
+
+---
+
 ## 2. Very low volume: Soloist persisted volume 40
 
 ### Evidence

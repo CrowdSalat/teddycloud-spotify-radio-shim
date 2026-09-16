@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"regexp"
 	"sync/atomic"
+
+	"github.com/crowdsalat/teddycloud-spotify-radio-shim/internal/audio"
 )
 
 var validURI = regexp.MustCompile(`^spotify:(track|album|playlist|episode):[A-Za-z0-9]+$`)
@@ -112,8 +114,8 @@ func writeWAVHeader() []byte {
 	binary.LittleEndian.PutUint32(h[16:20], 16)
 	binary.LittleEndian.PutUint16(h[20:22], 1)
 	binary.LittleEndian.PutUint16(h[22:24], 2)
-	binary.LittleEndian.PutUint32(h[24:28], 44100)
-	binary.LittleEndian.PutUint32(h[28:32], 176400)
+	binary.LittleEndian.PutUint32(h[24:28], audio.SampleRate)
+	binary.LittleEndian.PutUint32(h[28:32], audio.ByteRate())
 	binary.LittleEndian.PutUint16(h[32:34], 4)
 	binary.LittleEndian.PutUint16(h[34:36], 16)
 

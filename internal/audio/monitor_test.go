@@ -3,6 +3,7 @@ package audio
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,8 +32,8 @@ func TestDaemonArgsPinSampleSpec(t *testing.T) {
 			continue
 		}
 
-		if !strings.Contains(a, "rate=44100") {
-			t.Errorf("null-sink load argument missing rate=44100: %q", a)
+		if !strings.Contains(a, fmt.Sprintf("rate=%d", SampleRate)) {
+			t.Errorf("null-sink load argument missing rate=%d: %q", SampleRate, a)
 		}
 
 		if !strings.Contains(a, "channels=2") {

@@ -71,11 +71,11 @@ func TestStream_ValidURI(t *testing.T) {
 	if got := binary.LittleEndian.Uint16(body[22:24]); got != 2 {
 		t.Errorf("channels: got %d, want 2", got)
 	}
-	if got := binary.LittleEndian.Uint32(body[24:28]); got != 44100 {
-		t.Errorf("sample rate: got %d, want 44100", got)
+	if got := binary.LittleEndian.Uint32(body[24:28]); got != 22050 {
+		t.Errorf("sample rate: got %d, want 22050", got)
 	}
-	if got := binary.LittleEndian.Uint32(body[28:32]); got != 176400 {
-		t.Errorf("byte rate: got %d, want 176400", got)
+	if got := binary.LittleEndian.Uint32(body[28:32]); got != 88200 {
+		t.Errorf("byte rate: got %d, want 88200", got)
 	}
 	if got := binary.LittleEndian.Uint16(body[32:34]); got != 4 {
 		t.Errorf("block align: got %d, want 4", got)
