@@ -10,4 +10,4 @@ resources:
   - route.yaml
 images:
   - name: ghcr.io/crowdsalat/teddycloud-spotify-shim
-    newTag: v0.1.5
+    newTag: v0.1.6

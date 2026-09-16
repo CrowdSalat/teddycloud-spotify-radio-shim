@@ -30,7 +30,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: shim
-          image: ghcr.io/crowdsalat/teddycloud-spotify-shim:v0.1.5
+          image: ghcr.io/crowdsalat/teddycloud-spotify-shim:v0.1.6
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
