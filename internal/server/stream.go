@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"sync/atomic"
 )
 
 var validURI = regexp.MustCompile(`^spotify:(track|album|playlist|episode):[A-Za-z0-9]+$`)
@@ -69,32 +70,33 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	flush(w)
 
 	ch := src.Chunks()
-	s.delivered.Add(streamChunks(ctx, w, ch, streamFlushThreshold))
+	streamChunks(ctx, w, &s.delivered, ch, streamFlushThreshold)
 }
 
-// streamFlushThreshold is the minimum batch size for HTTP writes.
-// 16 KiB (4–8 chunks) avoids delayed-ACK coalescing that starves
-// ffmpeg at small segment sizes.
-const streamFlushThreshold = 16384
+// streamFlushThreshold is the minimum batch size for HTTP writes. Larger
+// segments amortize teddycloud's per-segment read overhead on the box: the
+// measured 4 KiB → 16 KiB step (0.475x → 0.73x) implies ~26 ms per segment,
+// so 131072 B (32 chunks ≈ 743 ms of audio) is expected to reach ≥0.96x
+// real time.
+const streamFlushThreshold = 131072
 
-// streamChunks writes audio chunks to w using batched writes of at
-// least flushThreshold bytes. It returns the total chunk bytes written.
-func streamChunks(ctx context.Context, w io.Writer, ch <-chan []byte, flushThreshold int) uint64 {
+// streamChunks writes audio chunks to w using batched writes of at least
+// flushThreshold bytes, and counts every logical byte into delivered as the
+// consumer pulls it.
+func streamChunks(ctx context.Context, w io.Writer, delivered *atomic.Uint64, ch <-chan []byte, flushThreshold int) {
 	bw := bufio.NewWriterSize(w, flushThreshold)
-	var delivered uint64
-
 	for {
 		select {
 		case <-ctx.Done():
 			_ = bw.Flush()
-			return delivered
+			return
 		case chunk, ok := <-ch:
 			if !ok {
 				_ = bw.Flush()
-				return delivered
+				return
 			}
 			n, _ := bw.Write(chunk)
-			delivered += uint64(n)
+			delivered.Add(uint64(n))
 		}
 	}
 }

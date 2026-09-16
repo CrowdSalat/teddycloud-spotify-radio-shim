@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -269,7 +270,7 @@ func (wr *writeRecorder) Write(p []byte) (int, error) {
 
 func TestStreamBatching(t *testing.T) {
 	const chunkSize = 4096
-	const numChunks = 8
+	const numChunks = 40
 
 	ch := make(chan []byte, numChunks)
 	for i := 0; i < numChunks; i++ {
@@ -278,19 +279,20 @@ func TestStreamBatching(t *testing.T) {
 	close(ch)
 
 	rec := &writeRecorder{}
-	total := streamChunks(context.Background(), rec, ch, streamFlushThreshold)
+	var delivered atomic.Uint64
+	streamChunks(context.Background(), rec, &delivered, ch, streamFlushThreshold)
 
 	want := uint64(numChunks * chunkSize)
-	if total != want {
-		t.Errorf("streamChunks bytes: got %d, want %d", total, want)
+	if got := delivered.Load(); got != want {
+		t.Errorf("delivered: got %d, want %d", got, want)
 	}
 
-	// 8 × 4096 = 32768 bytes with a 16384 threshold flushes as exactly
-	// two full-size segments before the final flush.
 	if len(rec.writes) == 0 {
 		t.Fatal("no writes observed")
 	}
-	for i, n := range rec.writes {
+	// Every segment except the trailing partial flush must meet the
+	// threshold; the consumer must never see a drip of partial chunks.
+	for i, n := range rec.writes[:len(rec.writes)-1] {
 		if n < streamFlushThreshold {
 			t.Errorf("write[%d]: %d bytes < %d threshold", i, n, streamFlushThreshold)
 		}

@@ -12,7 +12,7 @@ All notable changes to this project will be documented in this file.
 
 - *(ocp)* Point ExternalSecret at Infisical store, match cluster template
 - *(container)* Fully qualify base image names for multi-arch builds
-- *(stream)* batch /stream writes into 16 KiB segments so ffmpeg drains the WAV stream at real time
+- *(stream)* batch /stream writes into ≥128 KiB segments so ffmpeg drains the WAV stream at ~real time
 
 ### Build
 
