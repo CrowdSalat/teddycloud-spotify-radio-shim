@@ -33,6 +33,10 @@ type Config struct {
 	StaticStream bool
 	// StaticSampleRate is the sample rate of the synthesized static stream.
 	StaticSampleRate uint32
+	// RecorderBuffer is the buffered channel capacity in chunks for the live
+	// PulseRecorder. More slack absorbs transient consumer stalls instead of
+	// dropping chunks. Set via RECORDER_BUFFER.
+	RecorderBuffer int
 }
 
 // Load reads configuration from environment variables.
@@ -74,6 +78,12 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("STATIC_SAMPLE_RATE must be 8000–96000, got %q", os.Getenv("STATIC_SAMPLE_RATE"))
 	}
 	c.StaticSampleRate = uint32(sr)
+
+	buf, err := getenvInt("RECORDER_BUFFER", 1024)
+	if err != nil || buf < 1 || buf > 65536 {
+		return nil, fmt.Errorf("RECORDER_BUFFER must be 1–65536 chunks, got %q", os.Getenv("RECORDER_BUFFER"))
+	}
+	c.RecorderBuffer = buf
 
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("missing required environment variables: %v", missing)

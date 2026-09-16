@@ -24,7 +24,7 @@ PulseAudio "virtual_out.monitor" ← shim recorder (non-blocking, drop-on-full)
    │  chunks 4096 B
    ▼
 shim /stream  →  WAV container, 22050 Hz, 88.2 kB/s  (HTTP, chunked, no CL)
-   │  ▲ the only "fat" leg: near teddycloud's ~136 kB/s read ceiling
+   │  ▲ fat leg (88.2 kB/s); proven non-limiting by STATIC_STREAM diagnostic (§4)
    ▼
 ffmpeg (spawned by teddycloud): decode WAV → resample to 48000 Hz s16le → stdout pipe
    │  PCM 48000 Hz s16le stereo 1536 kbit/s (in-memory/popen)
@@ -122,10 +122,13 @@ real-time) and `drop_ratio` (chunks discarded by recorder drop-on-full).
 | v0.1.4 | batch /stream writes to 16 KiB segments | 0.73× | ~0.29 |
 | v0.1.5 | batch to 128 KiB segments | 0.77× | ~0.26 |
 | v0.1.6 | halve capture rate to 22050 Hz (88.2 kB/s) | 0.89× | ~0.17 |
+| v0.1.7 | STATIC_STREAM=true (synthesized tone, unpaced) | 36.9× direct / 75–100× real-box | 0 (recorder bypassed) |
 
-Leading to a consumer read ceiling of ~136 kB/s (4→16 KiB segments gave the
-biggest single gain 0.475→0.73×; 16→128 KiB and half-rate capture keep
-helping but plateau).
+The 4→16 KiB segment gain (0.475→0.73×) led to a *conjectured* consumer read
+ceiling of ~136 kB/s (16→128 KiB and half-rate capture plateau). **The v0.1.7
+result disproves that ceiling** — see §4a: with the recorder removed from the
+path, the exact same consumer (ffmpeg + teddycloud + box) reads the stream at
+75–100×.
 
 ### Current symptom (v0.1.6)
 
@@ -137,6 +140,33 @@ helping but plateau).
 - Control: the same box plays a web radio (AAC 64 kbps) through the **identical**
   teddycloud code path at 1.11× without drops.
 
+## 4a. STATIC_STREAM diagnostic (v0.1.7) — isolates the bottleneck
+
+**Hypothesis to test:** is the ~0.89× ceiling (a) teddycloud's HTTP ingest (a
+~136 kB/s read ceiling) or (b) the shim's live pacing (recorder drop-on-full)?
+
+**Method:** `STATIC_STREAM=true` swaps `/stream`'s source from the live
+PulseRecorder to a Go goroutine that synthesizes a 440 Hz sine WAV and produces
+(as fast as the consumer drains). No recording, no pacing, no drop-valve — the
+shim is no longer the production rate-limiter.
+
+**Result (2026-09-16, real Toniebox + real teddycloud):**
+- Direct probe `ffmpeg -i http://teddycloud-spotify-shim:8080/stream...` from
+  inside the teddycloud pod: **speed=36.9×** (≈3.25 MB/s), sustained.
+- Playback on the real Toniebox (teddycloud's identical encode path):
+  ffmpeg **75–100×**, shim `streams=1 delivered_kB_s≈2000–19000`, zero drops,
+  box played the tone cleanly.
+- Same box, same teddycloud, same network as the 0.89× runs — only the shim's
+  producer differed.
+
+**Conclusion:** the HTTP ingest leg and the box are NOT the bottleneck.
+teddycloud's ffmpeg can read /stream at >3 MB/s when there's no production
+bottleneck. The ~0.89× ceiling therefore comes entirely from the shim's **live
+recorder path**: production at exactly real-time, delivered against a tiny
+8-chunk (~186 ms) buffered channel with drop-on-full. This matches the
+decision rule: static ≥1.0× → **fix shim buffering/pacing** (Step 3), NOT
+AAC encoding.
+
 ### Full history and root-cause write-ups
 
 See `docs/research/ocp-playback-issues.md` (drop-on-full, segment-size and
@@ -144,16 +174,30 @@ sample-rate investigations, §1–1c) for the detailed analysis.
 
 ---
 
-## 5. Direction: encode in the shim
+## 5. Direction (revised after §4a): fix shim buffering/pacing first
+
+§4a proves the shim's live recorder path is the sole bottleneck — its read
+channel gives the consumer only ~186 ms of slack before chunks are dropped.
+Fix options, in order of preference:
+
+1. **Bigger recorder buffer / slack** — raise `defaultBufferLen` (8 chunks →
+   seconds of PCM) so transient consumer stalls are absorbed instead of
+   dropping. Cheapest, no format change.
+2. **Remove drop-on-full for slow consumers** — block or hold in a second
+   stage buffer instead of discarding, at the cost of live-lag.
+3. **Fallback if buffering proves insufficient:** AAC encoding in the shim
+   (§5.1) — reduce the leg to ~8–16 kB/s.
+
+## 5.1 Fallback: encode AAC in the shim
 
 Swap the shim's raw WAV for AAC so the fat HTTPS leg goes from ~88 kB/s to
 ~8–16 kB/s, reproducing the radio's margin:
 
-| Source | Byte rate | vs ceiling 136 kB/s |
-|--------|-----------|---------------------|
-| WAV 22050 Hz | 88 kB/s | 65 % (too tight) |
-| AAC-LC 64 kbps | 8 kB/s | 6 % (comfortable) |
-| AAC-LC 96–128 kbps | 12–16 kB/s | 9–12 % (comfortable) |
+| Source | Byte rate | Margin vs radio (8 kB/s) |
+|--------|-----------|---------------------------|
+| WAV 22050 Hz | 88 kB/s | 11× the radio's rate (tight) |
+| AAC-LC 64 kbps | 8 kB/s | = radio's rate (comfortable) |
+| AAC-LC 96–128 kbps | 12–16 kB/s | 1.5–2× (comfortable) |
 
 `ffmpeg -i <aac-url> -f s16le -ar 48000 -ac 2 -ss 0 -` decodes AAC-LC cleanly;
 the `<source>` field is already arbitrary "anything ffmpeg can decode", so no

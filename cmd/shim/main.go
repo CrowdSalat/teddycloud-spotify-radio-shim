@@ -124,7 +124,7 @@ func main() {
 	// Phase 3b.2: live monitor recorder. It runs independently of the Soloist
 	// branch below: audio flows even while the Soloist session is missing or
 	// unpaired.
-	go runRecorder(ctx, pa, slot)
+	go runRecorder(ctx, pa, slot, cfg.RecorderBuffer)
 
 	// Phase 12 measurement: sample recorder and /stream counters into rate
 	// telemetry independent of HTTP clients.
@@ -268,9 +268,10 @@ func runSupervisor(ctx context.Context, srv *server.Server, cfg *config.Config, 
 
 // runRecorder waits for the PulseAudio daemon to become ready, then keeps the
 // live virtual_out.monitor stream recording through PulseRecorder, reconnecting
-// with exponential backoff when the stream dies (e.g. after a daemon crash). It
-// never blocks the Soloist pairing or supervisor branches.
-func runRecorder(ctx context.Context, pa *audio.PulseAudio, slot *recorderSlot) {
+// with exponential backoff when the stream dies (e.g. after a daemon crash).
+// bufferLen is the buffered chunk-channel capacity in chunks. It never blocks
+// the Soloist pairing or supervisor branches.
+func runRecorder(ctx context.Context, pa *audio.PulseAudio, slot *recorderSlot, bufferLen int) {
 	for !pa.Ready() {
 		select {
 		case <-ctx.Done():
@@ -294,7 +295,7 @@ func runRecorder(ctx context.Context, pa *audio.PulseAudio, slot *recorderSlot) 
 			return
 		}
 
-		rec := &audio.PulseRecorder{Source: stream}
+		rec := &audio.PulseRecorder{Source: stream, BufferLen: bufferLen}
 		rec.Start(ctx)
 		slot.set(rec)
 

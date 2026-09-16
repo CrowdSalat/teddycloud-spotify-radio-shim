@@ -10,7 +10,10 @@ import (
 
 const (
 	defaultChunkSize = 4096
-	defaultBufferLen = 8
+	// defaultBufferLen is the buffered channel capacity when BufferLen is 0.
+	// 1024 chunks = 4 MiB ≈ 48 s of PCM at 22050 Hz, absorbing transient
+	// consumer stalls without dropping audio.
+	defaultBufferLen = 1024
 )
 
 // ChunkSource yields fixed-size PCM chunks for /stream consumers.
