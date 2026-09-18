@@ -79,7 +79,7 @@ func Load() (*Config, error) {
 	}
 	c.StaticSampleRate = uint32(sr)
 
-	buf, err := getenvInt("RECORDER_BUFFER", 1024)
+	buf, err := getenvInt("RECORDER_BUFFER", 256)
 	if err != nil || buf < 1 || buf > 65536 {
 		return nil, fmt.Errorf("RECORDER_BUFFER must be 1–65536 chunks, got %q", os.Getenv("RECORDER_BUFFER"))
 	}

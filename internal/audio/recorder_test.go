@@ -309,6 +309,53 @@ func TestPulseRecorderContextCancelTerminatesPump(t *testing.T) {
 	}
 }
 
+func TestPulseRecorderFlush(t *testing.T) {
+	const chunkSize = 16
+	const bufferLen = 8
+
+	// Source delivers exactly enough data to fill the buffer, then EOF. The
+	// pump finishes before Flush runs, so the channel holds bufferLen stale
+	// chunks with no concurrent enqueue to race against.
+	data := make([]byte, chunkSize*bufferLen)
+	for i := range data {
+		data[i] = byte(i)
+	}
+
+	var mu sync.Mutex
+	off := 0
+
+	src := sourceFunc(func(p []byte) (int, error) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		if off >= len(data) {
+			return 0, io.EOF
+		}
+
+		n := copy(p, data[off:])
+		off += n
+
+		return n, nil
+	})
+
+	r := &PulseRecorder{Source: src, ChunkSize: chunkSize, BufferLen: bufferLen}
+	r.Start(context.Background())
+	defer r.Stop()
+
+	waitDone(t, r.done, time.Second)
+
+	if got := len(r.Chunks()); got != bufferLen {
+		t.Fatalf("pre-fill: got %d buffered chunks, want %d", got, bufferLen)
+	}
+
+	r.Flush()
+
+	if got := len(r.Chunks()); got != 0 {
+		t.Fatalf("after Flush: %d chunks still buffered, want 0", got)
+	}
+}
+
+// TestPulseRecorderDefaults verifies that Stop before Start is safe.
 func TestPulseRecorderDefaults(t *testing.T) {
 	r := &PulseRecorder{}
 

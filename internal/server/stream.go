@@ -61,6 +61,14 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		s.streamMu.Unlock()
 	}()
 
+	// Discard the stale pre-fill the live recorder accumulated while no
+	// consumer was attached, so this stream starts at the live edge. Without
+	// this, a /stream connect drains up to a buffer's worth of old audio
+	// instantly (fast ffmpeg encode ahead + drop of the fresh audio), which
+	// the streaming ingest treats as a broken stream. The static source never
+	// pre-fills, so it is unaffected.
+	flushStalePreFill(src)
+
 	if s.play != nil {
 		if err := s.play(uri); err != nil {
 			slog.Warn("soloist play failed", "uri", uri, "err", err)
@@ -78,6 +86,15 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 
 	ch := src.Chunks()
 	streamChunks(ctx, w, &s.delivered, ch, streamFlushThreshold)
+}
+
+// flushStalePreFill discards any audio the source buffered before this
+// consumer attached. It is a no-op for sources without stale pre-fill (e.g.
+// the synthesized static source).
+func flushStalePreFill(src ChunkSource) {
+	if f, ok := src.(interface{ Flush() }); ok {
+		f.Flush()
+	}
 }
 
 // streamFlushThreshold is the minimum batch size for HTTP writes. Larger

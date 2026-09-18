@@ -11,9 +11,10 @@ import (
 const (
 	defaultChunkSize = 4096
 	// defaultBufferLen is the buffered channel capacity when BufferLen is 0.
-	// 1024 chunks = 4 MiB ≈ 48 s of PCM at 22050 Hz, absorbing transient
-	// consumer stalls without dropping audio.
-	defaultBufferLen = 1024
+	// 256 chunks = 1 MiB ≈ 12 s of PCM at 22050 Hz. Large enough to absorb
+	// transient consumer stalls (e.g. ffmpeg bursts) without dropping audio,
+	// small enough that the pre-fill discarded at /stream connect is brief.
+	defaultBufferLen = 256
 )
 
 // ChunkSource yields fixed-size PCM chunks for /stream consumers.
@@ -116,6 +117,28 @@ func (p *PulseRecorder) SampleRate() uint32 {
 // Dropped returns the number of chunks dropped due to a full channel.
 func (p *PulseRecorder) Dropped() uint64 {
 	return p.dropped.Load()
+}
+
+// Flush discards every chunk currently buffered in the channel. It snaps a
+// fresh /stream consumer to the live edge instead of draining the stale
+// pre-fill the recorder accumulated while no consumer was attached. Chunks
+// produced concurrently after the drain are kept; the pump races with the
+// drain only for chunks that were enqueued while it runs.
+func (p *PulseRecorder) Flush() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.chunkCh == nil {
+		return
+	}
+
+	for {
+		select {
+		case <-p.chunkCh:
+		default:
+			return
+		}
+	}
 }
 
 // Done blocks until the pump goroutine has exited. Before Start it returns a

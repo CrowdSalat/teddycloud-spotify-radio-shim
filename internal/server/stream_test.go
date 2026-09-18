@@ -39,6 +39,61 @@ func newFakeChunkSource(chunks ...[]byte) *fakeChunkSource {
 	return &fakeChunkSource{ch: ch}
 }
 
+// flushableSource is a ChunkSource that records flushStalePreFill invocations
+// so tests can prove the stale pre-fill is discarded at connect.
+type flushableSource struct {
+	fakeChunkSource
+	flushed int
+}
+
+func (f *flushableSource) Flush() {
+	for {
+		select {
+		case <-f.ch:
+			f.flushed++
+		default:
+			return
+		}
+	}
+}
+
+func TestStream_FlushesStalePreFill(t *testing.T) {
+	ch := make(chan []byte, 8)
+	ch <- []byte("stale1")
+	ch <- []byte("stale2")
+
+	src := &flushableSource{fakeChunkSource: fakeChunkSource{ch: ch}}
+	s := New("localhost:0", func() ChunkSource { return src }, nil)
+
+	srv := httptest.NewServer(s.mux)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/stream?spotify_uri=spotify:album:FLS")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	// Feed the real audio only after the handler had a chance to flush, then
+	// close so the handler terminates and the body is fully readable.
+	time.Sleep(50 * time.Millisecond)
+	ch <- []byte("fresh1")
+	close(ch)
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if src.flushed != 2 {
+		t.Errorf("flushed %d stale chunks, want 2", src.flushed)
+	}
+
+	if got := string(body[44:]); got != "fresh1" {
+		t.Errorf("body after header: got %q, want %q (stale pre-fill must be dropped)", got, "fresh1")
+	}
+}
+
 func TestStream_ValidURI(t *testing.T) {
 	fake := newFakeChunkSource([]byte("chunk1"), []byte("chunk2"), []byte("chunk3"))
 	s := New("localhost:0", func() ChunkSource { return fake }, nil)
