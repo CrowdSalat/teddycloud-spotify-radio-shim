@@ -133,7 +133,7 @@ Soloist ──libpulse──▶ virtual_out (null sink)
                           Toniebox
 ```
 
-The recorder runs continuously and independently of HTTP clients. Chunks are discarded when the channel is full (backpressure safety valve) to prevent the PulseAudio client buffer from stalling.
+The recorder runs continuously and independently of HTTP clients. Chunks are discarded when the channel is full (backpressure safety valve) to prevent the PulseAudio client buffer from stalling. The channel buffers ~12 s (256 chunks) so transient consumer stalls are absorbed; on `/stream` connect the handler flushes the stale pre-fill so each consumer starts at the live edge (see `research/streaming-pipeline-e2e.md` §4b).
 
 **Fallback:** if `github.com/jfreymuth/pulse` is insufficient, replace the recorder goroutine with `ffmpeg -f pulse -i virtual_out.monitor -f s16le -ar 44100 -ac 2 pipe:1` via `StdoutPipe()`. The `chan []byte` interface is unchanged.
 

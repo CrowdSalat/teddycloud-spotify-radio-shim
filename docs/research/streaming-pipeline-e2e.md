@@ -1,8 +1,13 @@
-# Research: streaming pipeline end-to-end (2026-09-16)
+# Research: streaming pipeline end-to-end (2026-09-16, resolved 2026-09-18)
 
 All findings on how a Spotify-playing Toniebox works through teddycloud + the
 shim, how teddycloud encodes audio, why radio streams play cleanly while our
 shim stutters, and every fix tried so far with measured results.
+
+**Outcome:** the shim stutter root cause — the live recorder's tiny
+drop-on-full channel — was fixed and the box now plays Spotify cleanly
+(`fix(stream): flush stale pre-fill at /stream connect`, v0.1.9, 2026-09-18).
+See §4b for the resolution.
 
 Source of truth for the teddycloud internals: `teddycloud` git checkout
 (`src/handler_cloud.c`, `src/toniefile.c`, `src/cyclone/.../http_server.c`).
@@ -123,6 +128,8 @@ real-time) and `drop_ratio` (chunks discarded by recorder drop-on-full).
 | v0.1.5 | batch to 128 KiB segments | 0.77× | ~0.26 |
 | v0.1.6 | halve capture rate to 22050 Hz (88.2 kB/s) | 0.89× | ~0.17 |
 | v0.1.7 | STATIC_STREAM=true (synthesized tone, unpaced) | 36.9× direct / 75–100× real-box | 0 (recorder bypassed) |
+| v0.1.8 | `RECORDER_BUFFER` configurable; default raised 8 → 1024 chunks | 95.1× (stale pre-fill burst) | 0.73 at connect (fresh audio dropped) |
+| v0.1.9 | **flush stale pre-fill at /stream connect**; default buffer 1024 → 256 chunks | ≈1.0× | ~0.00 |
 
 The 4→16 KiB segment gain (0.475→0.73×) led to a *conjectured* consumer read
 ceiling of ~136 kB/s (16→128 KiB and half-rate capture plateau). **The v0.1.7
@@ -130,7 +137,7 @@ result disproves that ceiling** — see §4a: with the recorder removed from the
 path, the exact same consumer (ffmpeg + teddycloud + box) reads the stream at
 75–100×.
 
-### Current symptom (v0.1.6)
+### Current symptom (v0.1.6, pre-fix baseline)
 
 - Recorder produces exactly real-time (~21.5 chunks/s = 88.2 kB/s) — healthy.
 - Consumer (ffmpeg) pulls at ~76.8 kB/s → 0.89×: the drop-valve still throws
@@ -174,21 +181,72 @@ sample-rate investigations, §1–1c) for the detailed analysis.
 
 ---
 
+## 4b. Resolution: flush the stale pre-fill at /stream connect (v0.1.8 → v0.1.9)
+
+**Good news first:** the buffer bump direction from §5 was correct — v0.1.8
+(`defaultBufferLen` 8 → 1024 chunks ≈ 47 s, `RECORDER_BUFFER` env) removed the
+drop-on-full stutter entirely while soloist was playing: telemetry showed
+`chunks_s=21.1 dropped_s=0.0 drop_ratio=0.00 delivered_kB_s=84.4 streams=1`,
+i.e. a perfectly paced real-time stream.
+
+**The regression:** the box was silent anyway. The recorder keeps filling its
+channel even while *no consumer is attached* (it reads the monitor 24/7). So on
+Lift→Place of the tonie, `/stream` connected to a channel already full of
+**pre-connect audio** (up to 47 s of the previous content, or silence). The
+handler streamed that stale pre-fill out instantly:
+
+- telemetry at connect: `delivered_kB_s=435.2 chunks_s=6.4 dropped_s=16.9
+  drop_ratio=0.73` — the fresh audio after `play(uri)` was being dropped while
+  the old buffer drained,
+- teddycloud's ffmpeg: `speed=95.1x → 16.2x`, then `Encoding aborted, active
+  flag set to false` (`toniefile.c:0812`), stream restarted with
+  `delay 2000ms` (`handler_cloud.c:0673`) and finally failed with
+  `file ... not available or not send, error=End of file reached [304]`.
+
+Shrinking `RECORDER_BUFFER` (tried 128) did **not** help: any pre-fill, even
+6 s, is dumped the same way. The stale-audio burst — not the buffer size — was
+the failure mode.
+
+**The fix (`fix(stream): flush stale pre-fill at /stream connect`, v0.1.9):**
+`handleStream` now calls `flushStalePreFill(src)` after the hot-swap cancel,
+before writing the WAV header. `PulseRecorder.Flush()` drains the channel
+non-blocking, so each consumer snaps to the **live edge**: the box only ever
+hears audio recorded after it connected. The static source is unaffected (it
+does not pre-fill and has no `Flush`). Default buffer lowered to 256 chunks
+(≈12 s) — enough to absorb transient mid-stream ffmpeg bursts, and trivial to
+flush at connect; `RECORDER_BUFFER` remains configurable.
+
+**Verified (real Toniebox, 2026-09-18, teddycloud v0.7.0):** box plays Spotify
+cleanly; no `Encoding aborted`, no `[304]`; `pipeline: util` shows
+`drop_ratio=0.00` at a steady ~84.4 kB/s. Root cause is fully resolved — the
+AAC fallback (§5.1) is not needed.
+
+---
+
 ## 5. Direction (revised after §4a): fix shim buffering/pacing first
 
-§4a proves the shim's live recorder path is the sole bottleneck — its read
-channel gives the consumer only ~186 ms of slack before chunks are dropped.
-Fix options, in order of preference:
+§4a proved the shim's live recorder path was the sole bottleneck — its read
+channel gave the consumer only ~186 ms of slack before dropping chunks. Fix
+options, in order of preference:
 
-1. **Bigger recorder buffer / slack** — raise `defaultBufferLen` (8 chunks →
-   seconds of PCM) so transient consumer stalls are absorbed instead of
-   dropping. Cheapest, no format change.
-2. **Remove drop-on-full for slow consumers** — block or hold in a second
-   stage buffer instead of discarding, at the cost of live-lag.
-3. **Fallback if buffering proves insufficient:** AAC encoding in the shim
-   (§5.1) — reduce the leg to ~8–16 kB/s.
+1. ✅ **Bigger recorder buffer / slack** — this was the correct first step, but
+   **only in combination with §4b's flush-at-connect.** A bigger buffer
+   eliminated the drop-on-full stutter; the flush made sure a fresh consumer
+   starts at the live edge instead of inheriting the buffer's stale pre-fill.
+   Both shipped together in v0.1.9.
+2. ✅ **Discard stale pre-fill at connect (the missing piece)** —
+   `PulseRecorder.Flush()` drains the channel non-blocking so each `/stream`
+   consumer snaps to the live edge. Core of the resolution (§4b).
+3. **Remove drop-on-full for slow consumers** — not needed; the 256-chunk
+   buffer absorbs transient stalls and flush handles connect.
+4. **Fallback if buffering proves insufficient:** AAC encoding in the shim
+   (§5.1) — **not needed**; the box plays cleanly on the raw WAV leg.
 
-## 5.1 Fallback: encode AAC in the shim
+## 5.1 Fallback: encode AAC in the shim (superseded — WAV leg works)
+
+Kept for reference only: the raw WAV leg at 88 kB/s was feared too tight, but
+the v0.1.9 result shows it is comfortably within budget once the live pacing
+is right.
 
 Swap the shim's raw WAV for AAC so the fat HTTPS leg goes from ~88 kB/s to
 ~8–16 kB/s, reproducing the radio's margin:

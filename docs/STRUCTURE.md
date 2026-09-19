@@ -756,44 +756,43 @@ Final acceptance on the deployed pod:
 
 ## Phase 12 — Playback quality: stop recorder audio drops (jumps)
 
-**Status: in progress** — root cause revised on 2026-09-16 (see
-[research/ocp-playback-issues.md](research/ocp-playback-issues.md) §1b).
+**Status: done** — fixed 2026-09-18 (see
+[research/streaming-pipeline-e2e.md](research/streaming-pipeline-e2e.md) §4b).
 
 **Goal:** a raw-WAV `/stream` that teddycloud's ffmpeg can drain at real time,
 so the recorder's drop-on-full safety valve stops dropping audio.
 
 ### Context
 
-Recorder produces exactly real time (~43 chunks/s = 176400 B/s ÷ 4096 B).
-teddycloud's ffmpeg drained at ~0.47x and the 8-chunk (~186 ms) internal buffer
-filled, so the non-blocking `default:` branch discarded ~half the audio. The
-2026-09-16 measurement (pipeline telemetry + radio control) shows the 0.47x is a
-*client-side artifact of the tiny per-chunk HTTP writes* (delayed-ACK segment
-coalescing), not an upstream deficiency: the same box plays radio at 1.11x via
-the identical ffmpeg code path. The drop must stay off the pulse library's
-connection goroutine (a blocking send there stalls the native-protocol socket
-queues and wedges the whole connection — the original Phase 3b.1 constraint),
-but the consumer's read pace must become real time.
+Recorder produces exactly real time (~21.5 chunks/s = 88200 B/s ÷ 4096 B at
+22050 Hz). teddycloud's ffmpeg drained at ~0.47x and the 8-chunk (~186 ms)
+internal buffer filled, so the non-blocking `default:` branch discarded ~half
+the audio. The 2026-09-16 measurement (pipeline telemetry + radio control)
+shows the 0.47x is a *client-side artifact of the tiny per-chunk HTTP writes*
+(delayed-ACK segment coalescing), not an upstream deficiency: the same box plays
+radio at 1.11x via the identical ffmpeg code path. The drop must stay off the
+pulse library's connection goroutine (a blocking send there stalls the
+native-protocol socket queues and wedges the whole connection — the original
+Phase 3b.1 constraint), but the consumer's read pace must become real time.
 
-### Tasks
+### Resolution (v0.1.9)
 
-- Batch `/stream` body writes in `handleStream`: accumulate chunks and flush
-  segments of ≥16 KB (~4–8 chunks ≈ 92–190 ms) instead of one `Write` per
-  4096-byte chunk, so the client receives few, larger, ACK-friendly segments.
-- Keep chunk size frame-aligned (4096 B is a multiple of the 4 B s16le-stereo
-  frame) and the recorder drop-on-full as-is (now reachable only if the client
-  truly stalls).
-- Add the correct `Content-Type: audio/wav` header; keep `/healthz` green and
-  the recorder independent of any HTTP client.
-- Keep the `pipeline: util` telemetry line as the acceptance instrument.
+1. **Bigger buffer** — `defaultBufferLen` raised to 256 chunks (≈12 s,
+   `RECORDER_BUFFER` env override) so transient consumer stalls are absorbed
+   instead of dropping.
+2. **Flush stale pre-fill at connect** — `PulseRecorder.Flush()` + the
+   `flushStalePreFill` call in `handleStream` snap each `/stream` consumer to
+   the live edge. Without this, a connect inherited up to a buffer's worth of
+   pre-connect audio and dumped it as an instant burst (ffmpeg at 95× then
+   `Encoding aborted` → silent box).
 
 ### Verification
 
 ```bash
-# on the OCP pod: recorder counters, deliver rate should track 176400 B/s real time
+# on the OCP pod: recorder counters, deliver rate tracks 88200 B/s real time
 oc logs -l app=teddycloud-spotify-shim -n app-teddycloud | grep -E "pipeline:|chunks"
-# → dropped ≈ 0 and delivered ≈ 176400 B/s (172.3 kB/s) while playing; jumps gone on the Toniebox
-# → teddycloud ffmpeg speed ≈ 1.0x on a Spotify tonie
+# → dropped ≈ 0 and delivered ≈ 84.4 kB/s while playing; clean audio on the Toniebox
+# → teddycloud ffmpeg speed ≈ 1.0x on a Spotify tonie, no "Encoding aborted"
 
 # local: the stream writes occur in batched segments, not per chunk
 go test ./internal/server/... -run TestStreamCounters -v

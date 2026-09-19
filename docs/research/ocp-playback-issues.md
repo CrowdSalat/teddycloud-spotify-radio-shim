@@ -1,5 +1,11 @@
 # Research: OCP playback quality issues (2026-09-14)
 
+> **Resolved 2026-09-18 (v0.1.9).** The jumps/`drop_ratio` defect was fixed by a
+> bigger recorder buffer (256 chunks ≈ 12 s, `RECORDER_BUFFER`) *combined with*
+> flushing the stale pre-fill at `/stream` connect — see
+> `streaming-pipeline-e2e.md` §4b for the full resolution. The volume defect
+> (§2) remains open.
+
 Observed on the deployed OpenShift pod (`teddycloud-spotify-shim`) while playing
 "Die drei ??? — Falsche Schuld" on the real Toniebox, 2026-09-14.
 

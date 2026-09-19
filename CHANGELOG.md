@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.9] - 2026-09-18
+
+### Bug Fixes
+
+- *(stream)* Flush stale recorder pre-fill at `/stream` connect; the recorder
+  buffers continuously while no consumer is attached, so a raw connect dumped
+  up to a buffer's worth of pre-connect audio instantly (ffmpeg encode burst,
+  fresh audio dropped), which the streaming ingest treated as a broken stream
+- *(audio)* Lower `defaultBufferLen` to 256 chunks (~12 s) — enough slack for
+  transient ffmpeg bursts, trivial to flush at connect; `RECORDER_BUFFER`
+  remains configurable (previously 1024 chunks ≈ 48 s, v0.1.8)
+- *(audio)* Add `PulseRecorder.Flush()` to snap consumers to the live edge
+
+## [0.1.8] - 2026-09-16
+
+### Features
+
+- *(audio)* `RECORDER_BUFFER` env to size the recorder buffer; default raised
+  8 → 1024 chunks (stale pre-fill regression fixed in v0.1.9)
+
+### Chores
+
+- *(deploy)* Set image to fixed buffer version; parallel container build
+
 ## [unreleased]
 
 ### Features
