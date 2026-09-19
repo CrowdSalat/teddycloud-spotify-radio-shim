@@ -1,10 +1,14 @@
 # Research: OCP playback quality issues (2026-09-14)
 
-> **Resolved 2026-09-18 (v0.1.9).** The jumps/`drop_ratio` defect was fixed by a
-> bigger recorder buffer (256 chunks ≈ 12 s, `RECORDER_BUFFER`) *combined with*
-> flushing the stale pre-fill at `/stream` connect — see
-> `streaming-pipeline-e2e.md` §4b for the full resolution. The volume defect
-> (§2) remains open.
+> **Both defects resolved.**
+>
+> - §1 jumps / `drop_ratio` — fixed 2026-09-18 (v0.1.9): bigger recorder buffer
+>   (256 chunks ≈ 12 s, `RECORDER_BUFFER`) *combined with* flushing the stale
+>   pre-fill at `/stream` connect. Full resolution: `streaming-pipeline-e2e.md`
+>   §4b.
+> - §2 very low volume — fixed (v0.1.3): `set_volume 100` after activate plus
+>   `--initial-volume` at spawn, gated by `SOLOIST_VOLUME` (resolution note at
+>   the end of §2).
 
 Observed on the deployed OpenShift pod (`teddycloud-spotify-shim`) while playing
 "Die drei ??? — Falsche Schuld" on the real Toniebox, 2026-09-14.
@@ -162,3 +166,11 @@ Recommended: volume 100 on activate, plus optionally honour a
 `SOLOIST_VOLUME`/`TEDDYCLOUD_VOLUME` env default.
 
 Recorded as Phase 13 task.
+
+### Resolution (v0.1.3)
+
+Both fixes shipped: `set_volume` is sent after WS `activate`, and Soloist is
+also spawned with `--initial-volume` (see `internal/soloist/supervisor.go`).
+Volume is operator-configurable via `SOLOIST_VOLUME` (0–100, default 100);
+negative/zero skips the command. `VolumeLevel`/`VolumedB` SSE events remain
+debug-ignored (box-local speaker level).

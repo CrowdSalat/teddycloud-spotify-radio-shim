@@ -192,7 +192,12 @@ Example messages:
 | Right ear slap | `skip_next` |
 | Left ear slap | `skip_prev` |
 
-### Volume — VERIFIED PROBLEM (2026-09-14, OCP pod)
+### Volume — VERIFIED PROBLEM (2026-09-14, OCP pod) — fixed v0.1.3
+
+> **Resolution (v0.1.3):** the shim now sends `set_volume` after WS `activate`
+> *and* spawns Soloist with `--initial-volume`, gated by `SOLOIST_VOLUME`
+> (0–100, default 100) — see `internal/soloist/supervisor.go`. The note below
+> is kept as the historical write-up.
 
 Observed live on the deployed OCP shim while playing "Falsche Schuld":
 
