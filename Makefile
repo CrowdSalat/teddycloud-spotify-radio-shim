@@ -1,7 +1,7 @@
 # Makefile
 
 IMAGE     ?= teddycloud-spotify-shim
-GHCR_IMAGE ?= ghcr.io/crowdsalat/teddycloud-spotify-shim
+GHCR_IMAGE ?= ghcr.io/crowdsalat/teddycloud-spotify-radio-shim
 VERSION    ?= v0.1.0
 DATA_DIR  ?= $(CURDIR)/container/soloist-data/
 CACHE_DIR ?= $(CURDIR)/container/soloist-cache/
