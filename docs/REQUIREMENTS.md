@@ -2,7 +2,7 @@
 
 ## 1. Purpose
 
-A Toniebox is a children's audio player. It is controlled by physical interactions: placing a figurine on top to play, lifting it to pause, slapping the ears to skip. A Toniebox does not connect to Spotify directly. It streams audio over HTTP from a server.
+A Toniebox is a children's audio player. It is controlled by physical interactions: placing a figurine on top to play, lifting it to pause, tapping the side of the box to skip. A Toniebox does not connect to Spotify directly. It streams audio over HTTP from a server.
 
 This service bridges that gap. It makes Spotify content reachable from a Toniebox via Teddycloud. The figurine triggers playback; the Toniebox receives an audio stream; the physical controls work.
 
@@ -66,10 +66,12 @@ Physical interactions on the Toniebox produce events. Teddycloud captures these 
 |---|---|
 | Figurine placed on Toniebox | Resume playback |
 | Figurine lifted off Toniebox | Pause playback |
-| Right ear slap | Skip to next track |
-| Left ear slap | Skip to previous track |
+| Tap the right side of the box (tilt forward) | Skip to next track |
+| Tap the left side of the box (tilt backward) | Skip to previous track |
 
 **Why these controls matter:** The Toniebox has no screen and no keyboard. These four physical gestures are the only way a child interacts with it. If they do not work, the device is not usable with Spotify.
+
+**Not a control: the ears.** Pinching the big or small ear is the Toniebox's own volume control, and the box applies the new level to the audio it plays. The shim must ignore ear pinches entirely — mapping them to a track skip makes a volume change jump the song (verified on hardware 2026-09-27).
 
 ### 5.1 Source of control events
 

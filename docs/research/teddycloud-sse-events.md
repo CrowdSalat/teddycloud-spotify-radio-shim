@@ -96,7 +96,7 @@ event: pressed
 data: { "type":"pressed", "data":"ear-small" }
 ```
 
-Note the exact ordering from the raw capture: **`VolumeLevel` → `VolumedB` → `pressed`** in every instance. Left-ear double press appears as `pressed` / `ear-small-double`. Knock/tilt is `knock` / `forward` or `backward`.
+Note the exact ordering from the raw capture: **`VolumeLevel` → `VolumedB` → `pressed`** in every instance. Left-ear double press appears as `pressed` / `ear-small-double`. Knock/tilt is `knock` / `forward` or `backward` — that is the track-skip gesture, see the control mapping below.
 
 ---
 
@@ -120,6 +120,29 @@ Other deltas:
 |---|---|---|
 | Figurine placed | `TagValid` | `play` (URI from `/stream` request) |
 | Figurine lifted | `playback` `stopped` | `pause` |
-| Right ear | `pressed` `ear-big` | `skip_next` |
-| Left ear | `pressed` `ear-small` | `skip_prev` |
-| Left-ear double | `pressed` `ear-small-double` | — (currently ignored) |
+| Tap right side / tilt forward | `knock` `forward` | `skip_next` |
+| Tap left side / tilt backward | `knock` `backward` | `skip_prev` |
+| Ear pinch (big/small/double) | `pressed` `ear-big`/`ear-small`/… | — (box volume) |
+
+### Correction 2026-09-27 — ears are volume, knock is navigation
+
+The first version of this table mapped `pressed` `ear-big` → `skip_next` and
+`ear-small` → `skip_prev`. **That was wrong**, and hardware confirmed it
+(VLS1, 2026-09-27): an ear pinch made the track jump.
+
+The Toniebox's own controls (per Tonies' documentation, verified against the
+capture above):
+
+- **Pinch the big ear** — volume up. **Pinch the small ear** — volume down. The
+  box applies the level itself, which is why every `pressed` event in the
+  capture is immediately preceded by a `VolumeLevel`/`VolumedB` pair. The shim
+  ignores these; there is nothing for it to do.
+- **Tap the right side of the box** — next track. **Tap the left side** —
+  previous track. This is the accelerometer gesture Teddycloud reports as
+  `knock` `forward`/`backward`, and it is the real skip control.
+- **Tilt** is a within-track seek on real hardware (fast-forward/rewind a few
+  seconds), which has no Soloist equivalent; the shim treats it as a track skip.
+
+The direction is also operator-configurable in the Tonies app ("Fast-forwarding
+& rewinding" flips which side goes forward), so a box set up the other way round
+will feel reversed to the shim's mapping.

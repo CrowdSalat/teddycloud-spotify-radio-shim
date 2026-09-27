@@ -84,11 +84,11 @@ func (h *hub) trigger(action string) {
 		h.broadcast(event{Name: "ContentTitle", Data: "Unknown"})
 	case "figurine-lifted":
 		h.broadcast(event{Name: "playback", Data: "stopped"})
-	case "right-ear-slap":
+	case "ear-big":
 		h.broadcast(event{Name: "VolumeLevel", Data: "12"})
 		h.broadcast(event{Name: "VolumedB", Data: "-3"})
 		h.broadcast(event{Name: "pressed", Data: "ear-big"})
-	case "left-ear-slap":
+	case "ear-small":
 		h.broadcast(event{Name: "VolumeLevel", Data: "10"})
 		h.broadcast(event{Name: "VolumedB", Data: "-9"})
 		h.broadcast(event{Name: "pressed", Data: "ear-small"})
@@ -199,10 +199,14 @@ button { display: block; margin: 0.5rem 0; font-size: 1rem; padding: 0.6rem 1rem
 <body>
 <h1>Mock Teddycloud Control</h1>
 <p>Click a button to emit the corresponding SSE event.</p>
+<p>Controls: place/lift, and tap the side of the box to skip. The ears are the
+box's own volume control and must not change the track.</p>
 <form method="post" action="/api/event?action=figurine-placed"><button type="submit">Place figurine</button></form>
 <form method="post" action="/api/event?action=figurine-lifted"><button type="submit">Lift figurine</button></form>
-<form method="post" action="/api/event?action=right-ear-slap"><button type="submit">Right ear</button></form>
-<form method="post" action="/api/event?action=left-ear-slap"><button type="submit">Left ear</button></form>
+<form method="post" action="/api/event?action=knock-forward"><button type="submit">Skip next (tap right side)</button></form>
+<form method="post" action="/api/event?action=knock-backward"><button type="submit">Skip back (tap left side)</button></form>
+<form method="post" action="/api/event?action=ear-big"><button type="submit">Ear pinch up (box volume)</button></form>
+<form method="post" action="/api/event?action=ear-small"><button type="submit">Ear pinch down (box volume)</button></form>
 </body>
 </html>
 `

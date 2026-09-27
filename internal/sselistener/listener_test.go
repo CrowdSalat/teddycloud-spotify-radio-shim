@@ -158,11 +158,11 @@ func TestListener_PlaybackStartingStartedIgnored(t *testing.T) {
 	}
 }
 
-// TestListener_PressedEarBigSkipNext checks that pressed ear-big triggers
-// SkipNext.
-func TestListener_PressedEarBigSkipNext(t *testing.T) {
+// TestListener_KnockForwardSkipNext checks that knock forward triggers
+// SkipNext — tapping the right side of the box goes to the next track.
+func TestListener_KnockForwardSkipNext(t *testing.T) {
 	const events = "" +
-		"event: pressed\ndata: { \"type\":\"pressed\", \"data\":\"ear-big\" }\n\n"
+		"event: knock\ndata: { \"type\":\"knock\", \"data\":\"forward\" }\n\n"
 
 	srv := sseServer(events)
 	defer srv.Close()
@@ -186,11 +186,11 @@ func TestListener_PressedEarBigSkipNext(t *testing.T) {
 	waitStopped(t, done)
 }
 
-// TestListener_PressedEarSmallSkipPrev checks that pressed ear-small triggers
-// SkipPrev.
-func TestListener_PressedEarSmallSkipPrev(t *testing.T) {
+// TestListener_KnockBackwardSkipPrev checks that knock backward triggers
+// SkipPrev — tapping the left side of the box goes to the previous track.
+func TestListener_KnockBackwardSkipPrev(t *testing.T) {
 	const events = "" +
-		"event: pressed\ndata: { \"type\":\"pressed\", \"data\":\"ear-small\" }\n\n"
+		"event: knock\ndata: { \"type\":\"knock\", \"data\":\"backward\" }\n\n"
 
 	srv := sseServer(events)
 	defer srv.Close()
@@ -214,11 +214,19 @@ func TestListener_PressedEarSmallSkipPrev(t *testing.T) {
 	waitStopped(t, done)
 }
 
-// TestListener_PressedEarSmallDoubleIgnored checks that pressed ear-small-double
-// produces no command.
-func TestListener_PressedEarSmallDoubleIgnored(t *testing.T) {
+// TestListener_EarPressesIgnored checks that every ear pinch produces no
+// command. The ears are the box's own volume control; the shim must not turn
+// them into a track skip (verified on hardware 2026-09-27).
+func TestListener_EarPressesIgnored(t *testing.T) {
 	const events = "" +
-		"event: pressed\ndata: { \"type\":\"pressed\", \"data\":\"ear-small-double\" }\n\n"
+		"event: VolumeLevel\ndata: { \"type\":\"VolumeLevel\", \"data\":\"12\" }\n\n" +
+		"event: VolumedB\ndata: { \"type\":\"VolumedB\", \"data\":\"-3\" }\n\n" +
+		"event: pressed\ndata: { \"type\":\"pressed\", \"data\":\"ear-big\" }\n\n" +
+		"event: VolumeLevel\ndata: { \"type\":\"VolumeLevel\", \"data\":\"10\" }\n\n" +
+		"event: VolumedB\ndata: { \"type\":\"VolumedB\", \"data\":\"-9\" }\n\n" +
+		"event: pressed\ndata: { \"type\":\"pressed\", \"data\":\"ear-small\" }\n\n" +
+		"event: pressed\ndata: { \"type\":\"pressed\", \"data\":\"ear-small-double\" }\n\n" +
+		"event: pressed\ndata: { \"type\":\"pressed\", \"data\":\"ear-big-double\" }\n\n"
 
 	srv := sseServer(events)
 	defer srv.Close()
@@ -245,14 +253,13 @@ func TestListener_PressedEarSmallDoubleIgnored(t *testing.T) {
 	}
 }
 
-// TestListener_IgnoresKnockVolumeAndKeepAlive checks that transport noise and
+// TestListener_IgnoresVolumeAndKeepAlive checks that transport noise and
 // unmapped events produce no commands.
-func TestListener_IgnoresKnockVolumeAndKeepAlive(t *testing.T) {
+func TestListener_IgnoresVolumeAndKeepAlive(t *testing.T) {
 	const events = "" +
 		"event: keep-alive\ndata: { \"type\":\"keep-alive\", \"data\":\"\" }\n\n" +
 		"event: VolumeLevel\ndata: { \"type\":\"VolumeLevel\", \"data\":\"12\" }\n\n" +
 		"event: VolumedB\ndata: { \"type\":\"VolumedB\", \"data\":\"-3\" }\n\n" +
-		"event: knock\ndata: { \"type\":\"knock\", \"data\":\"forward\" }\n\n" +
 		"event: ContentAudioId\ndata: { \"type\":\"ContentAudioId\", \"data\":\"436906887\" }\n\n" +
 		"event: ContentTitle\ndata: { \"type\":\"ContentTitle\", \"data\":\"Unknown\" }\n\n" +
 		": a comment line\n\n" +
@@ -286,6 +293,34 @@ func TestListener_IgnoresKnockVolumeAndKeepAlive(t *testing.T) {
 // unmapped payload is dropped rather than mapped arbitrarily.
 func TestListener_UnknownPressedIsIgnored(t *testing.T) {
 	srv := sseServer("event: pressed\ndata: { \"type\":\"pressed\", \"data\":\"ear-something-else\" }\n\n")
+	defer srv.Close()
+
+	f := &fakeSender{}
+	l := newTestListener(srv.URL, f)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		l.Run(ctx)
+	}()
+
+	select {
+	case <-ctx.Done():
+	case <-time.After(150 * time.Millisecond):
+	}
+	cancel()
+	waitStopped(t, done)
+
+	if calls := f.snapshot(); len(calls) != 0 {
+		t.Fatalf("expected no commands, got %v", calls)
+	}
+}
+
+// TestListener_UnknownKnockIsIgnored checks that a knock event with an unmapped
+// payload is dropped rather than mapped arbitrarily.
+func TestListener_UnknownKnockIsIgnored(t *testing.T) {
+	srv := sseServer("event: knock\ndata: { \"type\":\"knock\", \"data\":\"sideways\" }\n\n")
 	defer srv.Close()
 
 	f := &fakeSender{}

@@ -8,11 +8,17 @@
 //     /stream?spotify_uri= request, never through SSE → Play("").
 //   - playback "starting"/"started" is debug-ignored; "stopped" signals the
 //     figurine was lifted → Pause().
-//   - pressed "ear-big" → SkipNext(); "ear-small" → SkipPrev();
-//     "ear-small-double" and unknown values are debug-ignored.
+//   - pressed "ear-big"/"ear-small"/"ear-*-double" are the box's own volume
+//     control (pinch the big ear to turn up, the small ear to turn down) and are
+//     debug-ignored: the box applies the new level to the audio it plays, so the
+//     shim has nothing to do. Verified on hardware 2026-09-27 — mapping these to
+//     skips made an ear pinch jump the track.
+//   - knock "forward" → SkipNext(); "backward" → SkipPrev(). This is the
+//     track-skip gesture: tap the right side of the box to go forward, the left
+//     side to go back.
 //   - There is no TagInvalid event on the real server.
-//   - VolumeLevel, VolumedB, ContentAudioId, ContentTitle, knock, keep-alive
-//     and all other events are irrelevant to the control path and debug-ignored.
+//   - VolumeLevel, VolumedB, ContentAudioId, ContentTitle, keep-alive and all
+//     other events are irrelevant to the control path and debug-ignored.
 //
 // The wire format is: event:<name>\ndata: {"type":"<name>","data":"<value>"}\n\n
 package sselistener
@@ -236,20 +242,24 @@ func (l *Listener) dispatch(eventName, data string) {
 			slog.Debug("sselistener: ignoring playback event", "data", data)
 		}
 	case "pressed":
-		// Real Teddycloud labels ear presses by physical placement:
-		// "ear-big" is the volume-up (forward/right) ear,
-		// "ear-small" the volume-down (left) ear.
+		// An ear pinch is the Toniebox's volume control and the box applies the
+		// new level to the audio it plays on its own. Nothing for the shim here.
+		slog.Debug("sselistener: ignoring pressed event (box volume)", "data", data)
+	case "knock":
+		// Tap/tilt the box: forward skips ahead, back returns to the previous
+		// track.
 		switch wrappedValue(data) {
-		case "ear-big":
+		case "forward":
 			l.send("skip_next", "", l.Commands.SkipNext)
-		case "ear-small":
+		case "backward":
 			l.send("skip_prev", "", l.Commands.SkipPrev)
 		default:
-			slog.Debug("sselistener: ignoring pressed event", "data", data)
+			slog.Debug("sselistener: ignoring knock event", "data", data)
 		}
 	default:
 		// keep-alive, VolumeLevel, VolumedB, ContentTitle, ContentAudioId,
-		// knock, and all other events are irrelevant to the control path.
+		// knock with an unknown value, and all other events are irrelevant to
+		// the control path.
 		slog.Debug("sselistener: ignoring event", "event", eventName)
 	}
 }

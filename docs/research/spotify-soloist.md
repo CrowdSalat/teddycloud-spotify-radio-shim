@@ -189,8 +189,9 @@ Example messages:
 |---|---|
 | Figurine placed | `play` (resume) |
 | Figurine lifted | `pause` |
-| Right ear slap | `skip_next` |
-| Left ear slap | `skip_prev` |
+| Tap right side / tilt forward | `skip_next` |
+| Tap left side / tilt backward | `skip_prev` |
+| Ear pinch (big/small) | — (box volume, handled by the box) |
 
 ### Volume — VERIFIED PROBLEM (2026-09-14, OCP pod) — fixed v0.1.3
 

@@ -348,11 +348,11 @@ curl -s "http://localhost:8080/stream?spotify_uri=spotify:album:<id>" | \
 
 **`cmd/mock-teddycloud`:**
 - `GET /api/sse`: SSE stream, keep-alive, emits events when triggered by button clicks.
-- `GET /`: minimal HTML page with four buttons:
+- `GET /`: minimal HTML page with buttons:
   - **Place figurine** → SSE event figurine-placed (includes the URI from `--uri` flag).
   - **Lift figurine** → SSE event figurine-lifted.
-  - **Right ear** → SSE event right-ear-slap.
-  - **Left ear** → SSE event left-ear-slap.
+  - **Skip next / Skip back** → SSE event knock-forward / knock-backward.
+  - **Ear pinch up / down** → SSE event ear-big / ear-small.
 - `--addr` flag (default `:9090`), `--uri` flag (Spotify URI for figurine-placed events).
 - SSE event format must match real Teddycloud exactly so the listener works against both without a code change.
 
@@ -361,8 +361,17 @@ curl -s "http://localhost:8080/stream?spotify_uri=spotify:album:<id>" | \
 - Parse events:
   - `figurine-placed`: extract URI from payload, send WebSocket `play` with URI to Soloist.
   - `figurine-lifted`: send WebSocket `pause`.
-  - `right-ear-slap`: send WebSocket `skip_next`.
-  - `left-ear-slap`: send WebSocket `skip_prev`.
+  - `knock-forward`: send WebSocket `skip_next`.
+  - `knock-backward`: send WebSocket `skip_prev`.
+  - `pressed` (ear pinch): ignored — see the correction below.
+
+> **Corrected 2026-09-27 (hardware, VLS1).** This phase originally mapped
+> `right-ear-slap` → `skip_next` and `left-ear-slap` → `skip_prev`. That was a
+> wrong assumption: the ears are the box's own **volume** control, and tapping
+> the side of the box (`knock` `forward`/`backward`) is the **skip** gesture. An
+> ear pinch made the track jump. The mapping is now knock → skip, ears ignored.
+> Details and evidence: [research/teddycloud-sse-events.md](research/teddycloud-sse-events.md).
+
 - **Auto-reconnect** with backoff on drop or Teddycloud restart.
 - Unit test: feed synthetic SSE lines; assert correct WebSocket commands are produced.
 
@@ -382,7 +391,8 @@ curl "http://localhost:8080/stream?spotify_uri=spotify:album:<id>" | ffplay -f w
 # click each button → verify shim logs show correct WebSocket command
 # click Lift → audio pauses in ffplay
 # click Place → audio resumes
-# click Right ear → track skips
+# click Skip next → track skips
+# click Ear pinch → nothing (box volume only)
 ```
 
 ---
@@ -416,8 +426,9 @@ diff <(curl -s http://localhost:8080/api/sse) \
 
 - Place figurine → Spotify audio plays on a real Toniebox.
 - Lift figurine → audio pauses.
-- Right ear → next track.
-- Left ear → previous track.
+- Tap the right side of the box → next track.
+- Tap the left side of the box → previous track.
+- Pinch either ear → volume changes on the box, **the track does not change**.
 - `/healthz` returns `200` throughout.
 
 ---
@@ -747,8 +758,9 @@ Final acceptance on the deployed pod:
 
 - Place figurine → Spotify audio plays on Toniebox.
 - Lift figurine → audio pauses.
-- Right ear → next track.
-- Left ear → previous track.
+- Tap the right side of the box → next track.
+- Tap the left side of the box → previous track.
+- Pinch either ear → volume only, no track change.
 - Swap figurine → old stream stops, new album starts (hot-swap over the SDN, `TEDDYCLOUD_URL=http://teddycloud:80`).
 - `/healthz` returns `200` throughout.
 

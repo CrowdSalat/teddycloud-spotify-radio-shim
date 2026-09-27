@@ -41,7 +41,11 @@ func TestIndexHTML(t *testing.T) {
 	buf := new(strings.Builder)
 	_, _ = io.Copy(buf, resp.Body)
 
-	for _, want := range []string{"Place figurine", "Lift figurine", "Right ear", "Left ear"} {
+	for _, want := range []string{
+		"Place figurine", "Lift figurine",
+		"Skip next (tap right side)", "Skip back (tap left side)",
+		"Ear pinch up (box volume)", "Ear pinch down (box volume)",
+	} {
 		if !strings.Contains(buf.String(), want) {
 			t.Errorf("index HTML missing button %q", want)
 		}
@@ -208,11 +212,11 @@ func TestTriggerFigurineLifted(t *testing.T) {
 	}
 }
 
-func TestTriggerRightEarSlap(t *testing.T) {
+func TestTriggerEarBig(t *testing.T) {
 	srv := newMockServer()
 	defer srv.Close()
 
-	events := triggerAndRead(t, srv, "right-ear-slap", 3)
+	events := triggerAndRead(t, srv, "ear-big", 3)
 
 	want := []sseEvent{
 		{Name: "VolumeLevel", Data: `{ "type":"VolumeLevel", "data":"12" }`},
@@ -232,11 +236,11 @@ func TestTriggerRightEarSlap(t *testing.T) {
 	}
 }
 
-func TestTriggerLeftEarSlap(t *testing.T) {
+func TestTriggerEarSmall(t *testing.T) {
 	srv := newMockServer()
 	defer srv.Close()
 
-	events := triggerAndRead(t, srv, "left-ear-slap", 3)
+	events := triggerAndRead(t, srv, "ear-small", 3)
 
 	want := []sseEvent{
 		{Name: "VolumeLevel", Data: `{ "type":"VolumeLevel", "data":"10" }`},

@@ -151,8 +151,9 @@ The shim connects to `$TEDDYCLOUD_URL/api/sse` and translates events to WebSocke
 |---|---|
 | Figurine placed | `{ "type": "command", "command": "play" }` |
 | Figurine lifted | `{ "type": "command", "command": "pause" }` |
-| Right ear slap | `{ "type": "command", "command": "skip_next" }` |
-| Left ear slap | `{ "type": "command", "command": "skip_prev" }` |
+| Tap right side / tilt forward | `{ "type": "command", "command": "skip_next" }` |
+| Tap left side / tilt backward | `{ "type": "command", "command": "skip_prev" }` |
+| Ear pinch (big/small) | — (box volume, handled by the box) |
 
 ---
 
