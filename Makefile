@@ -17,54 +17,51 @@ VOL_OPTS := -v $(DATA_DIR):/data:Z -v $(CACHE_DIR):/cache:Z
 ENV_OPTS := --env-file $(ENV_FILE) -e TEDDYCLOUD_URL
 
 # ── Local test bench ─────────────────────────────────────────────────────────
-# Three processes make a figurine cycle reproducible without a physical box:
-# teddyCloud (real, so the RTNL→SSE translation and the ffmpeg pull are real),
-# the shim (the code under test), and cmd/mock-toniebox acting as the box.
+# The whole figurine cycle runs on one machine, with no Toniebox: a real
+# teddyCloud, this shim, and teddycloud-mock-toniebox as the box.
 #
-# Ports are split so nothing collides with a shim already on 8080: teddyCloud's
-# web listener keeps 8080 because that is where /api/sse and the GUI live, and
-# the shim moves to 8090.
+# The mock is a published image rather than a local build, so the rig tests what
+# users actually pull. Build it from source with `make mock-build` when changing
+# the mock; use `mock up` to run the stack from its current published tag.
 
-BENCH_DIR     ?= $(CURDIR)/.bench
-BENCH_TC      ?= teddycloud-e2e
+BENCH_COMPOSE ?= scripts/bench-compose.yaml
+BENCH_TC_API  ?= https://localhost:8443
+BENCH_WEB     ?= http://localhost:8080
 BENCH_ADDR    ?= http://localhost:9095
 BENCH_SHIM    ?= http://localhost:8090
-BENCH_TEDDY   ?= https://localhost:8443
-BENCH_WEB     ?= http://localhost:8080
-# The figurine the box carries by default. Its content.json points at the shim,
-# so a placement drives ffmpeg → GET /stream → the shim.
+# The figurine the box carries by default. Its content is pointed at the shim's
+# /stream by bench-figurine, so a placement drives ffmpeg -> GET /stream -> shim.
 BENCH_RUID    ?= E00403500EEA4BF2
 BENCH_URI     ?= spotify:track:4cOdK2wGLETKBW3PvgPWqT
-# The box reaches teddyCloud's HTTPS API listener, which is the only one behind
-# the client-certificate gate; host.containers.internal is how the container
-# reaches the shim on the host.
-BENCH_TC_API  ?= https://localhost:8443
-# Passed through to the shim. 0 means "pair for real", which needs PulseAudio or
-# PipeWire-pulse on the host; 1 serves a synthesized tone instead.
-BENCH_STATIC_STREAM ?= $${STATIC_STREAM:-0}
+MOCK_IMAGE    ?= ghcr.io/crowdsalat/teddycloud-mock-toniebox:latest
+
+## Build the mock box locally, for when changing it. bench-up uses the published
+## image by default, so the rig tests what users actually pull; point it at a
+## local build with:
+##   make mock-build && BENCH_MOCK_IMAGE=localhost/mock-toniebox:dev make bench-up
+mock-build:
+	podman build -t localhost/mock-toniebox:dev \
+		-f ../teddycloud-mock-toniebox/Containerfile \
+		../teddycloud-mock-toniebox
 
 ## Build the shim binary.
 build:
 	go build -trimpath -o bin/shim ./cmd/shim
 
-## Start a local Toniebox test bench: teddycloud, the shim, and a simulated box.
+## Start the bench: teddycloud, this shim, and a simulated box.
 ##
-## Afterwards drive the box with ./scripts/cycle.sh — it holds the UID and ports
-## and prints what each action did. Requires podman and a paired Soloist session
-## in $(BENCH_DIR)/data; the shim attempts real pairing on first start.
+## Afterwards drive the box with ./scripts/cycle.sh, which holds the UID and the
+## ports and prints what each action did.
+##
+## The shim image needs a GitHub token with read access to the crowdsalat org:
+##     echo "$GITHUB_TOKEN" | podman login ghcr.io -u crowdsalat --password-stdin
 bench-up:
-	@mkdir -p $(BENCH_DIR)/data $(BENCH_DIR)/cache $(BENCH_DIR)/logs
-	@go build -trimpath -o $(BENCH_DIR)/shim ./cmd/shim
-	@go build -trimpath -o $(BENCH_DIR)/mock-toniebox ./cmd/mock-toniebox
-	@chmod +x scripts/bench-shim.sh scripts/bench-box.sh scripts/cycle.sh
-	@$(MAKE) --no-print-directory bench-teddycloud
-	@$(MAKE) --no-print-directory bench-shim
-	@$(MAKE) --no-print-directory bench-box
+	@$(MAKE) --no-print-directory bench-up-compose
 	@$(MAKE) --no-print-directory bench-figurine
 	@$(MAKE) --no-print-directory bench-sse-check
 	@echo ""
 	@echo "bench up:"
-	@echo "  teddycloud  $(BENCH_WEB)  (web UI + /api/sse)"
+	@echo "  teddycloud  $(BENCH_WEB)   (web UI + /api/sse)"
 	@echo "  shim        $(BENCH_SHIM)  (/stream, /healthz)"
 	@echo "  box control $(BENCH_ADDR)"
 	@echo ""
@@ -75,45 +72,19 @@ bench-up:
 	@echo "  ./scripts/cycle.sh log shim   watch the shim's control path"
 	@echo "  ./scripts/cycle.sh down       tear the bench down"
 
-## Start the teddyCloud container the bench talks to.
-bench-teddycloud:
-	@if podman container exists $(BENCH_TC) 2>/dev/null; then \
-		podman start $(BENCH_TC) >/dev/null; \
-	else \
-		podman-compose -f scripts/teddycloud-compose.yaml up -d; \
-	fi
+## Bring up the three containers from scripts/bench-compose.yaml.
+bench-up-compose:
+	@podman-compose -f $(BENCH_COMPOSE) up -d
 	@# Wait on the SSE endpoint's *headers* only. A plain curl to /api/sse never
-	# returns: it is an event stream, so it holds the connection open and the
-	# probe would time out on every run. -m 2 with -o /dev/null still reports
-	# success because curl returns 0 once the response starts.
+	@# returns: it is an event stream, so it holds the connection open and the
+	@# probe would time out on every run. -m 2 still reports success because curl
+	@# exits 0 once the response has started.
 	@for i in $$(seq 1 30); do \
 		curl -fsS -m 2 -o /dev/null $(BENCH_WEB)/api/sse 2>/dev/null && break; \
 		sleep 1; \
 	done
-	@echo "teddycloud: $(BENCH_TC) up on $(BENCH_WEB)"
-
-## Start the shim.
-##
-## Real pairing is the default: with SOLOIST_API_KEY set the shim pairs on first
-## run and reuses the session in .bench/data afterwards. It needs a PulseAudio or
-## PipeWire-pulse server, because the recorder reads the virtual sink.
-##
-## STATIC_STREAM=1 substitutes a synthesized tone for the audio and skips the
-## audio server entirely. The transport and the control path are identical either
-## way, so this is the fallback for a host with no sound stack:
-##   make bench-up STATIC_STREAM=1
-##
-## The shim is launched through the script rather than inline: an inline
-## `setsid … &` inside a make recipe leaves the recipe's shell holding the
-## child's inherited descriptors, so make never returns even though the shim is
-## up and healthy.
-bench-shim:
-	@./scripts/bench-shim.sh
-
-## Start cmd/mock-toniebox as the box. Launched via script for the same reason as
-## bench-shim: an inline background process wedges make.
-bench-box:
-	@./scripts/bench-box.sh
+	@echo "teddycloud: up on $(BENCH_WEB)"
+	@echo "shim:       up on $(BENCH_SHIM)"
 
 ## Point the bench figurine's content at the shim's /stream.
 ##
@@ -121,32 +92,38 @@ bench-box:
 ## hand: the source is capped at 255 characters and classified as CT_SOURCE_STREAM
 ## because it contains "://", which is what makes teddyCloud run ffmpeg against it
 ## (src/contentJson.c:120-129).
+##
+## The URL uses the compose service name, so teddyCloud reaches the shim over the
+## shared network. That is the whole reason the rig is compose-based: no published
+## port and no host.containers.internal, both of which only work when the
+## consumer happens to be on the host.
 bench-figurine:
 	@curl -fsS -m 10 -X POST "$(BENCH_WEB)/content/json/set/$(BENCH_RUID)" \
-		--data-urlencode 'source=http://host.containers.internal:8090/stream?spotify_uri=$(BENCH_URI)' \
+		--data-urlencode 'source=http://shim:8080/stream?spotify_uri=$(BENCH_URI)' \
 		--data-urlencode 'live=true' \
 		--data-urlencode 'nocloud=true' \
 		--data-urlencode 'tonie_model=CUSTOM_RADIO' \
 		>/dev/null && echo "figurine: $(BENCH_RUID) -> shim /stream"
 	@curl -fsS -m 10 "$(BENCH_WEB)/content/json/get/$(BENCH_RUID)" \
-		| grep -q 'host.containers.internal' \
+		| grep -q 'http://shim:8080/stream' \
 		&& echo "           verified by reading it back" \
 		|| echo "           WARNING: content.json did not take; check teddycloud's log"
 
 ## Report whether the shim's SSE subscription is healthy.
 ##
 ## teddyCloud caps /api/sse at 8 subscribers (SSE_MAX_CHANNELS,
-## include/handler_sse.h:15) and answers 503 beyond that. The shim holds one and
-## the mock box can hold another, but reconnect churn during startup is enough to
-## fill the pool and have each kick the other off — which looks exactly like a
-## silent defect. Checking here turns that into a visible warning.
+## include/handler_sse.h:15). It also leaks a slot on every connection that
+## fails during its write phase, so the count only ratchets up over a long
+## session. Checking here turns "the shim is blind and says nothing" into a
+## visible warning, which matters because the failure is otherwise silent.
 bench-sse-check:
 	@if curl -sS -m 3 -o /dev/null -w '%{http_code}' $(BENCH_WEB)/api/sse 2>/dev/null | grep -q 503; then \
 		echo "warning: teddyCloud's SSE pool is full — the shim's control path may be blind"; \
-		echo "         close any stray 'podman logs -f | curl /api/sse' or captured feeds"; \
-		echo "         8 slots total (include/handler_sse.h:15)"; \
-	elif grep -qs '503 Service Unavailable' $(BENCH_DIR)/logs/shim.log; then \
-		echo "warning: the shim's SSE subscription was refused (see .bench/logs/shim.log)"; \
+		echo "         8 slots total (include/handler_sse.h:15), and a slot leaks on"; \
+		echo "         every failed write, so the pool only refills if teddyCloud restarts"; \
+		echo "         podman-compose -f $(BENCH_COMPOSE) restart teddycloud"; \
+	elif podman logs --since 30s shim 2>&1 | grep -qs '503 Service Unavailable'; then \
+		echo "warning: the shim's SSE subscription was refused (podman logs shim)"; \
 	else \
 		echo "sse: ok"; \
 	fi
@@ -154,12 +131,13 @@ bench-sse-check:
 ## Tear the bench down.
 bench-down:
 	@./scripts/cycle.sh down 2>/dev/null || true
-	@rm -rf $(BENCH_DIR)
-	@echo "bench down (removed $(BENCH_DIR))"
+	@podman-compose -f $(BENCH_COMPOSE) down 2>/dev/null || true
+	@echo "bench down"
 
-## Stop the bench's processes without deleting its state (pairing session, logs).
+## Stop the bench without deleting its state (Soloist pairing session, volumes).
 bench-stop:
-	@./scripts/cycle.sh down 2>/dev/null || true
+	@podman-compose -f $(BENCH_COMPOSE) stop 2>/dev/null || true
+	@echo "bench stopped"
 
 ## Run all unit tests.
 test:
@@ -214,4 +192,4 @@ migrate-session:
 
 .PHONY: build test lint container-build container-run container-push GHCR_PUSH \
 	container-push-ghcr container-tag changelog migrate-session \
-	bench-up bench-down bench-stop bench-teddycloud bench-shim bench-box bench-figurine bench-sse-check
+	bench-up bench-down bench-stop bench-up-compose bench-figurine bench-sse-check mock-build

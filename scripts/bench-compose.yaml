@@ -1,0 +1,86 @@
+# Local Toniebox test bench: teddyCloud, the shim, and a simulated box.
+#
+# Start:  make bench-up
+# Stop:   make bench-down
+#
+# The shim image is private, so log in first:
+#   echo "$GITHUB_TOKEN" | podman login ghcr.io -u crowdsalat --password-stdin
+#
+# Build against a locally built mock instead of the published one:
+#   make mock-build && BENCH_MOCK_IMAGE=localhost/mock-toniebox:dev make bench-up
+#
+# Everything is on one podman network, so services address each other by name.
+# That is the reason this is compose-based rather than a set of host-published
+# ports: teddyCloud's ffmpeg subprocess has to reach the shim's /stream, and
+# doing that from inside a container needs a name it can resolve, not
+# host.containers.internal or a second published port.
+#
+# Use podman-compose rather than `podman compose`, which shells out to
+# docker-compose and needs the podman socket running.
+
+services:
+  teddycloud:
+    container_name: teddycloud-bench
+    image: ghcr.io/toniebox-reverse-engineering/teddycloud:latest
+    ports:
+      # 8080:80 and 8443:443 published so the operator can use the web UI, the
+      # SSE feed and the box API from the host. Container-to-container traffic
+      # below does not go through these.
+      - "8080:80"
+      - "8443:443"
+    volumes:
+      - ${TEDDYCLOUD_SANDBOX:-../../../teddycloud}/dev-sandbox/run/certs:/teddycloud/certs:Z
+      - ${TEDDYCLOUD_SANDBOX:-../../../teddycloud}/dev-sandbox/run/config:/teddycloud/config:Z
+      - ${TEDDYCLOUD_SANDBOX:-../../../teddycloud}/dev-sandbox/run/data/content:/teddycloud/data/content:Z
+      - ${TEDDYCLOUD_SANDBOX:-../../../teddycloud}/dev-sandbox/run/data/library:/teddycloud/data/library:Z
+      - ${TEDDYCLOUD_SANDBOX:-../../../teddycloud}/dev-sandbox/run/data/www/custom_img:/teddycloud/data/www/custom_img:Z
+      - ${TEDDYCLOUD_SANDBOX:-../../../teddycloud}/dev-sandbox/run/data/firmware:/teddycloud/data/firmware:Z
+      - ${TEDDYCLOUD_SANDBOX:-../../../teddycloud}/dev-sandbox/run/data/cache:/teddycloud/data/cache:Z
+
+  shim:
+    container_name: shim
+    # The newest published build. `make container-tag GHCR_TAG=x` publishes one.
+    image: ${BENCH_SHIM_IMAGE:-ghcr.io/crowdsalat/teddycloud-spotify-radio-shim:latest}
+    ports:
+      - "8090:8080"
+    environment:
+      # Override in your environment, or export these before `make bench-up`.
+      # A dummy key is fine while STATIC_STREAM is on: nothing talks to Spotify.
+      SOLOIST_API_KEY: "${SOLOIST_API_KEY:-bench-not-a-real-key}"
+      TEDDYCLOUD_URL: "http://teddycloud:80"
+      LISTEN_ADDR: ":8080"
+      LOG_LEVEL: "${LOG_LEVEL:-debug}"
+      # 1 serves a synthesized tone and skips the audio server entirely. The
+      # transport and the control path are identical either way; only the audio
+      # differs. Set to 0 to pair for real, which needs PulseAudio or
+      # PipeWire-pulse inside the container.
+      STATIC_STREAM: "${STATIC_STREAM:-1}"
+    volumes:
+      # The paired Soloist session, so pairing survives a restart. Created by the
+      # entrypoint on first run; an anonymous volume would do, but a named one
+      # can be deleted deliberately with `make bench-down`.
+      - shim-data:/data
+      - shim-cache:/cache
+    # PulseAudio needs its socket directory writable, which is what makes
+    # STATIC_STREAM=0 possible at all inside a container.
+    security_opt:
+      - label=disable
+
+  mock-toniebox:
+    container_name: mock-toniebox
+    image: ${BENCH_MOCK_IMAGE:-ghcr.io/crowdsalat/teddycloud-mock-toniebox:latest}
+    depends_on:
+      - teddycloud
+    ports:
+      - "9095:9095"
+    command:
+      # The box API is the HTTPS listener, the only one behind teddyCloud's
+      # client-certificate gate; /api/sse lives on the web listener, a different
+      # port. Both addressed by service name since this is inside the network.
+      - --teddycloud=https://teddycloud:443
+      - --sse=http://teddycloud:80
+      - --uid=${BENCH_RUID:-E00403500EEA4BF2}
+
+volumes:
+  shim-data:
+  shim-cache:

@@ -19,23 +19,24 @@ podman run --rm \
 
 ## Local test bench
 
-The whole figurine cycle can be run on one machine, with no Toniebox and no
-deployed teddyCloud. Three processes:
+The whole figurine cycle can be run on one machine, with no Toniebox. Three
+containers on one network:
 
 | | |
 |---|---|
-| **teddyCloud** | real, in a container, so the RTNL→SSE translation and the ffmpeg pull are real rather than mocked |
+| **teddyCloud** | real, so the RTNL→SSE translation and the ffmpeg pull are real rather than mocked |
 | **the shim** | the code under test |
-| **a simulated box** | [`cmd/mock-toniebox`](cmd/mock-toniebox), which speaks the box side of the protocol |
+| **[`teddycloud-mock-toniebox`](https://github.com/CrowdSalat/teddycloud-mock-toniebox)** | a simulated box, published as an image |
 
 ```bash
+echo "$GITHUB_TOKEN" | podman login ghcr.io -u crowdsalat --password-stdin
 make bench-up                      # starts all three, prints what to run next
 ./scripts/cycle.sh place           # put a figurine on the box
 ./scripts/cycle.sh lift            # take it off
 ./scripts/cycle.sh cycle 10        # 10 place/lift cycles, with the measurement table
 ./scripts/cycle.sh report          # measurements so far, as JSON
 ./scripts/cycle.sh log shim        # the shim's control path
-./scripts/cycle.sh down            # tear the bench down
+make bench-down                    # tear the bench down
 ```
 
 `place` and `lift` are the two that matter. They produce exactly the signals the
@@ -43,17 +44,22 @@ shim's control path is built from — `TagValid` becomes `play`, `playback=stopp
 becomes `pause` — so a cycle here drives the same code a real figurine swap does.
 That makes the silence-after-swap defect reproducible on a laptop.
 
-Ports, so nothing collides with a shim already on 8080: teddyCloud's web listener
-keeps **8080** (`/api/sse`, GUI), the shim takes **8090**, the box control surface
-**9095**.
-
-Real Soloist pairing is the default. The shim needs PulseAudio or PipeWire-pulse
-for the recorder, so on a host with no sound stack use the synthesized tone
-instead — the transport and control path are identical, only the audio differs:
+The rig uses the **newest published shim**, so it tests what users actually pull.
+To test a local build instead, point the compose file at it:
 
 ```bash
-make bench-up STATIC_STREAM=1
+make container-build
+BENCH_SHIM_IMAGE=localhost/teddycloud-spotify-shim:dev make bench-up
 ```
 
-Details, and the protocol notes behind them, are in
-[`docs/mock-toniebox-design.md`](docs/mock-toniebox-design.md).
+`STATIC_STREAM` defaults to `1` in the rig: the shim serves a synthesized tone and
+needs no audio server, so the bench works unattended with no Spotify session. The
+transport and control path are identical either way. For real playback, set
+`STATIC_STREAM=0` and pair — which needs PulseAudio or PipeWire-pulse in the
+container.
+
+Ports: teddyCloud keeps **8080** (`/api/sse`, GUI) and **8443** (box API), the
+shim takes **8090**, the box control surface **9095**. Container-to-container
+traffic goes over the compose network by service name, so teddyCloud's ffmpeg
+reaches the shim at `http://shim:8080/stream` rather than through a published
+port.
