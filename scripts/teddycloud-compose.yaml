@@ -1,0 +1,39 @@
+# Local teddyCloud for exercising cmd/mock-toniebox end to end.
+#
+# Derived from https://github.com/toniebox-reverse-engineering/teddycloud/blob/master/docker/docker-compose.yaml
+# with changes for rootless Podman on a developer machine:
+#
+#   * ports are published on 8080/8443 rather than 80/443, because an
+#     unprivileged process may not bind below net.ipv4.ip_unprivileged_port_start
+#     (1024 here). The container still listens on 80 and 443; only the host
+#     mapping moves, so pass --teddycloud https://localhost:8443 --sse
+#     http://localhost:8080 to the mock.
+#   * the named volumes are replaced by the dev-sandbox checkout in
+#     ~/ws/teddycloud, which already carries known content: 30 TAFs in
+#     data/library, 32 figurines in data/content (lib://audio_00N.taf), and a
+#     server certificate chain.
+#   * restart policy is dropped so a test fixture does not come back on its own.
+#   * every bind carries :Z, because SELinux refuses a container write into a
+#     user_home_t directory otherwise — the entrypoint's very first mkdir fails.
+#
+# Start:  podman-compose -f scripts/teddycloud-compose.yaml up -d
+# Stop:   podman-compose -f scripts/teddycloud-compose.yaml down
+#
+# Use podman-compose rather than `podman compose`, which shells out to
+# docker-compose and needs the podman socket to be running.
+services:
+  teddycloud:
+    container_name: teddycloud-e2e
+    hostname: teddycloud
+    image: ghcr.io/toniebox-reverse-engineering/teddycloud:latest
+    ports:
+      - "8080:80"    # web UI and /api/sse
+      - "8443:443"   # box-facing HTTPS API, where RTNL lands
+    volumes:
+      - ${TEDDYCLOUD_SANDBOX:-../../../teddycloud}/dev-sandbox/run/certs:/teddycloud/certs:Z
+      - ${TEDDYCLOUD_SANDBOX:-../../../teddycloud}/dev-sandbox/run/config:/teddycloud/config:Z
+      - ${TEDDYCLOUD_SANDBOX:-../../../teddycloud}/dev-sandbox/run/data/content:/teddycloud/data/content:Z
+      - ${TEDDYCLOUD_SANDBOX:-../../../teddycloud}/dev-sandbox/run/data/library:/teddycloud/data/library:Z
+      - ${TEDDYCLOUD_SANDBOX:-../../../teddycloud}/dev-sandbox/run/data/www/custom_img:/teddycloud/data/www/custom_img:Z
+      - ${TEDDYCLOUD_SANDBOX:-../../../teddycloud}/dev-sandbox/run/data/firmware:/teddycloud/data/firmware:Z
+      - ${TEDDYCLOUD_SANDBOX:-../../../teddycloud}/dev-sandbox/run/data/cache:/teddycloud/data/cache:Z
