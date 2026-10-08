@@ -71,8 +71,4 @@ changelog:
 migrate-session:
 	./scripts/migrate-session.sh $(SOURCE_DIR) $(TARGET_POD)
 
-## Deploy the shim to OpenShift (requires oc).
-deploy-ocp:
-	oc apply -k container/ocp/
-
-.PHONY: build test lint container-build container-run container-push GHCR_PUSH container-push-ghcr container-tag changelog migrate-session deploy-ocp
+.PHONY: build test lint container-build container-run container-push GHCR_PUSH container-push-ghcr container-tag changelog migrate-session
