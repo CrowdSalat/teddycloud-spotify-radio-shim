@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -149,10 +151,23 @@ func (r *recorder) progress(p toniebox.DownloadProgress) {
 		if p.Chapters > 0 {
 			c.Chapters = p.Chapters
 		}
-		if p.Err != nil {
+		if p.Err != nil && !expectedEnd(p.Err) {
 			c.Err = p.Err.Error()
 		}
 	}
+}
+
+// expectedEnd reports whether an error is the box coming off the figurine rather
+// than the placement failing.
+//
+// The cycle generator cancels the download when the hold expires, which is how a
+// lift happens — and for a live stream the body never completes on its own, so
+// every cycle ends this way. Recording it as an error made failed_cycles fail on
+// a perfectly healthy run and turned the assertion into noise. The distinction
+// that matters to the report is bytes received and time to first byte, both of
+// which are recorded regardless.
+func expectedEnd(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, toniebox.ErrStalled)
 }
 
 // begin starts the active cycle.
@@ -235,9 +250,18 @@ func (r *recorder) measurements(cycles []cycle, events []observedEvent, audioIDs
 	out := []measurement{
 		{Name: "cycles", Value: fmt.Sprint(len(cycles)), Pass: pass(len(cycles) > 0),
 			Note: "placements completed"},
-		{Name: "observed_events", Value: fmt.Sprint(len(events))},
+		// Informational only. It is zero whenever --observe is off, which is the
+		// bench default, so it must never be read as "teddyCloud published
+		// nothing" — that is a question about the observer, not about the run.
+		{Name: "observed_events", Value: fmt.Sprint(len(events)),
+			Note: "only counted with --observe; the shim's own SSE subscription is not included"},
 	}
 
+	// The playback tallies and the stopped-per-cycle invariant depend on observed
+	// SSE events, so they only mean anything when the observer ran. With
+	// --observe off — the bench default, because the shim holds the SSE
+	// subscription — asserting on them would fail a perfectly healthy run for the
+	// wrong reason, which is worse than not asserting.
 	var stops, starts int
 	for _, evt := range events {
 		switch evt.Name {
@@ -250,15 +274,24 @@ func (r *recorder) measurements(cycles []cycle, events []observedEvent, audioIDs
 			}
 		}
 	}
-	out = append(out,
-		measurement{Name: "playback_started_events", Value: fmt.Sprint(starts)},
-		measurement{Name: "playback_stopped_events", Value: fmt.Sprint(stops)},
-		measurement{Name: "stopped_per_cycle",
-			Value: fmt.Sprintf("%.2f", ratio(stops, len(cycles))),
-			Pass:  pass(len(cycles) == 0 || stops == len(cycles)),
-			Note:  "a lift must produce exactly one playback=stopped and nothing else must",
-		},
-	)
+
+	if len(events) > 0 {
+		out = append(out,
+			measurement{Name: "playback_started_events", Value: fmt.Sprint(starts)},
+			measurement{Name: "playback_stopped_events", Value: fmt.Sprint(stops)},
+			measurement{Name: "stopped_per_cycle",
+				Value: fmt.Sprintf("%.2f", ratio(stops, len(cycles))),
+				Pass:  pass(len(cycles) == 0 || stops == len(cycles)),
+				Note:  "a lift must produce exactly one playback=stopped and nothing else must",
+			},
+		)
+	} else {
+		out = append(out, measurement{
+			Name:  "stopped_per_cycle",
+			Value: "not measured",
+			Note:  "requires --observe; the observer is off by default so the shim's SSE subscription is not crowded out",
+		})
+	}
 
 	// The number the whole tool exists for: how long the box sat with nothing to
 	// read between one placement and the next.
@@ -289,11 +322,25 @@ func (r *recorder) measurements(cycles []cycle, events []observedEvent, audioIDs
 		})
 	}
 
+	// Reported without a verdict, because the mock cannot tell a static source
+	// from a live one.
+	//
+	// For a static source the ids must be identical across cycles — that is the
+	// re-render check. For a live stream teddyCloud stamps the audio id with
+	// time(NULL) rather than a content hash (src/toniefile.c:745), so a new id per
+	// placement is correct behaviour and asserting stability would fail every
+	// cycle of a healthy stream run. Distinguishing the two needs the content
+	// source type, which only teddyCloud knows.
+	//
+	// A verdict here would therefore be wrong half the time, and an assertion that
+	// fires predictably is worse than none: it teaches you to ignore the row.
 	out = append(out, measurement{
 		Name:  "content_audio_ids",
 		Value: fmt.Sprintf("%v", audioIDs),
-		Note:  "must be a single id for one unchanged content source",
-		Pass:  pass(len(audioIDs) <= 1),
+		Note: "distinct TAF audio ids. One total is correct for a static source; " +
+			"one per placement is correct for a live stream, since teddyCloud " +
+			"stamps time(NULL) (src/toniefile.c:745). No verdict: the mock cannot " +
+			"tell the two sources apart",
 	})
 
 	if len(cycles) > 0 {

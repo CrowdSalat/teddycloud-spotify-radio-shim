@@ -65,9 +65,15 @@ var (
 	dropFlag    = flag.Int64("drop-after", 0, "abort every content body after N bytes (combine with --range-offset=resume)")
 	maxDownFlag = flag.Int64("max-download", 0, "stop reading after N bytes and hold the connection open")
 
-	holdFlag     = flag.Duration("hold", 5*time.Second, "how long /control/cycle holds a figurine before lifting it")
-	gapFlag      = flag.Duration("gap", 3*time.Second, "how long /control/cycle waits between lifting and the next placement")
-	obsFlag      = flag.Bool("observe", true, "subscribe to teddyCloud's /api/sse feed and record events")
+	holdFlag = flag.Duration("hold", 5*time.Second, "how long /control/cycle holds a figurine before lifting it")
+	gapFlag  = flag.Duration("gap", 3*time.Second, "how long /control/cycle waits between lifting and the next placement")
+	// Off by default: the shim already holds an /api/sse subscription, and
+	// teddyCloud caps them at 8 (SSE_MAX_CHANNELS, include/handler_sse.h:15).
+	// Two subscribers plus reconnect churn is enough to fill the pool, after
+	// which each knocks the other off and both see nothing. The observer is for
+	// inspecting the raw feed on its own; a bench run wants the shim's copy.
+	obsFlag = flag.Bool("observe", false, "also subscribe to teddyCloud's /api/sse and record events; "+
+		"off by default because the shim already holds one subscription")
 	sseFlag      = flag.String("sse", "", "teddyCloud web listener base URL for /api/sse; defaults to http://<teddycloud host>:80")
 	doubleMSFlag = flag.Int("double-press-ms", 150, "gap between the volume frame and an ear press, inside teddyCloud's 300 ms window")
 	padFlag      = flag.Int("pad-field6", 0, "extra filler bytes appended to the tag frame field6")

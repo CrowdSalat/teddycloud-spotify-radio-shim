@@ -1,9 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -146,34 +150,49 @@ func TestReportCountsCycles(t *testing.T) {
 	}
 }
 
-// TestReportDetectsRepeatedAudioID is the ContentAudioId invariant: a re-placement
-// of unchanged content must not produce a new audio id. This is the check that
-// catches a re-render leaking through.
+// TestReportDetectsRepeatedAudioID is the ContentAudioId invariant for a *static*
+// source: a re-placement of unchanged content must not produce a new audio id.
+// This is the check that catches a re-render leaking through.
+//
+// It deliberately does not apply to a live stream. teddyCloud stamps a stream's
+// audio id with time(NULL) (src/toniefile.c:745), so ids advance once per
+// placement there by design; asserting stability would fail a correct run on
+// every cycle.
 func TestReportDetectsRepeatedAudioID(t *testing.T) {
+	// A changed id is reported but carries no verdict: for a static source it is
+	// a re-render, for a live stream it is teddyCloud stamping time(NULL). The
+	// mock cannot distinguish the two, so it must not claim to have.
 	rec, base := newTestRecorder(t)
 	recordCycle(rec, base, 1, 100, 500, 431165001)
-	recordCycle(rec, base, 2, 4000, 4400, 999888777) // a new id for the same content
+	recordCycle(rec, base, 2, 4000, 4400, 999888777) // a new id
 
 	cycles, _ := rec.snapshot()
-	// The recorder collected the ids itself; pass them through as it would.
 	ms := rec.measurements(cycles, nil, collectedAudioIDs(rec))
 
 	ids := findMeasurement(ms, "content_audio_ids")
 	if ids == nil {
 		t.Fatal("no content_audio_ids measurement")
 	}
-	if ids.Pass == nil || *ids.Pass {
-		t.Errorf("two audio ids for one content source passed: %s", ids.Value)
+	if !strings.Contains(ids.Value, "999888777") {
+		t.Errorf("value = %q, want it to list both observed ids", ids.Value)
+	}
+	if ids.Pass != nil {
+		t.Errorf("audio ids carry verdict %v; the source type is unknown so there "+
+			"can be none", *ids.Pass)
+	}
+	if ids.Note == "" {
+		t.Error("a verdict-free measurement needs a note explaining what a reader should conclude")
 	}
 
-	// And the healthy case.
+	// The stable case is still reported, unchanged.
 	rec2, base2 := newTestRecorder(t)
 	recordCycle(rec2, base2, 1, 100, 500, 431165001)
 	recordCycle(rec2, base2, 2, 4000, 4400, 431165001)
 	cycles2, _ := rec2.snapshot()
 	ms2 := rec2.measurements(cycles2, nil, collectedAudioIDs(rec2))
-	if ids := findMeasurement(ms2, "content_audio_ids"); ids.Pass == nil || !*ids.Pass {
-		t.Errorf("a stable audio id failed: %s", ids.Value)
+	ids2 := findMeasurement(ms2, "content_audio_ids")
+	if strings.Contains(ids2.Value, ",") {
+		t.Errorf("stable audio ids reported as several: %s", ids2.Value)
 	}
 }
 
@@ -363,6 +382,64 @@ func TestReportFlagsEmptyCycles(t *testing.T) {
 	if withContent.Pass == nil || *withContent.Pass {
 		t.Error("a cycle with no bytes passed")
 	}
+}
+
+// TestReportIgnoresLiftCancellation covers the false failure that a live stream
+// produces on every single cycle.
+//
+// The cycle generator cancels the download when the hold expires — that is how a
+// lift happens — and a live stream body never completes on its own, so every
+// cycle ends with context.Canceled. Counting that as a failure made
+// failed_cycles fail on a completely healthy run, which is worse than a missing
+// assertion: it trains you to ignore the one measurement that should matter.
+func TestReportIgnoresLiftCancellation(t *testing.T) {
+	t.Run("cancellation is not a failure", func(t *testing.T) {
+		rec, base := newTestRecorder(t)
+		rec.begin(1, 0x7205759405470563)
+		rec.progress(toniebox.DownloadProgress{
+			At: at(base, 10), Path: "/v3/chapter/x", Status: 200, Bytes: 32768,
+		})
+		rec.progress(toniebox.DownloadProgress{
+			At: at(base, 5000), Path: "/v3/chapter/x", Status: 200, Bytes: 32768,
+			AudioID: 42, Done: true, Err: context.Canceled,
+		})
+
+		c := rec.finish()
+		if c.Err != "" {
+			t.Errorf("cycle recorded error %q, want none: the hold expiring is a lift", c.Err)
+		}
+		if c.Bytes == 0 {
+			t.Error("cycle recorded no bytes; the cancellation must not erase progress")
+		}
+
+		cycles, _ := rec.snapshot()
+		ms := rec.measurements(cycles, nil, nil)
+		if failed := findMeasurement(ms, "failed_cycles"); failed.Pass == nil || !*failed.Pass {
+			t.Errorf("failed_cycles = %q, want a pass", failed.Value)
+		}
+	})
+
+	t.Run("a stall release is not a failure", func(t *testing.T) {
+		rec, _ := newTestRecorder(t)
+		rec.begin(1, 1)
+		rec.progress(toniebox.DownloadProgress{
+			Done: true, AudioID: 42, Err: fmt.Errorf("wrapped: %w", toniebox.ErrStalled),
+		})
+		if c := rec.finish(); c.Err != "" {
+			t.Errorf("cycle recorded error %q, want none for a released stall", c.Err)
+		}
+	})
+
+	t.Run("a real failure is still recorded", func(t *testing.T) {
+		rec, _ := newTestRecorder(t)
+		rec.begin(1, 1)
+		rec.progress(toniebox.DownloadProgress{
+			Done: true, Err: errors.New("connection refused"),
+		})
+		if c := rec.finish(); c.Err == "" {
+			t.Error("a genuine error was swallowed by the lift-cancellation filter")
+		}
+	})
 }
 
 // TestReportFlagsFailedCycles and TestReportFlagsDistinctUIDs cover the remaining
