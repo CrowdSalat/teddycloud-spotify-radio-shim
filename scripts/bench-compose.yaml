@@ -3,8 +3,8 @@
 # Start:  make bench-up
 # Stop:   make bench-down
 #
-# The shim image is private, so log in first:
-#   echo "$GITHUB_TOKEN" | podman login ghcr.io -u crowdsalat --password-stdin
+# The shim image is published publicly, so there is nothing to log in to:
+#   podman pull ghcr.io/crowdsalat/teddycloud-spotify-radio-shim:latest
 #
 # Build against a locally built mock instead of the published one:
 #   make mock-build && BENCH_MOCK_IMAGE=localhost/mock-toniebox:dev make bench-up

@@ -53,8 +53,7 @@ build:
 ## Afterwards drive the box with ./scripts/cycle.sh, which holds the UID and the
 ## ports and prints what each action did.
 ##
-## The shim image needs a GitHub token with read access to the crowdsalat org:
-##     echo "$GITHUB_TOKEN" | podman login ghcr.io -u crowdsalat --password-stdin
+## The shim image is public on ghcr.io, so no registry login is needed.
 bench-up:
 	@$(MAKE) --no-print-directory bench-up-compose
 	@$(MAKE) --no-print-directory bench-figurine

@@ -1,13 +1,14 @@
 # teddycloud-spotify-radio-shim
 
-The shim image is private in GitHub Container Registry. Pulling it requires
-authentication with a GitHub token that has read access to the `crowdsalat`
-account (or the repository's packages):
+The shim image is published publicly in GitHub Container Registry — pull it
+like any other image, no login required:
 
 ```bash
-echo "$GITHUB_TOKEN" | podman login ghcr.io -u crowdsalat --password-stdin
 podman pull ghcr.io/crowdsalat/teddycloud-spotify-radio-shim:latest
 ```
+
+The image ships no secrets and no Spotify binaries: `SOLOIST_API_KEY` is passed
+in at runtime, and Soloist is downloaded on first start.
 
 Run it like any container image:
 
@@ -29,7 +30,6 @@ containers on one network:
 | **[`teddycloud-mock-toniebox`](https://github.com/CrowdSalat/teddycloud-mock-toniebox)** | a simulated box, published as an image |
 
 ```bash
-echo "$GITHUB_TOKEN" | podman login ghcr.io -u crowdsalat --password-stdin
 make bench-up                      # starts all three, prints what to run next
 ./scripts/cycle.sh place           # put a figurine on the box
 ./scripts/cycle.sh lift            # take it off

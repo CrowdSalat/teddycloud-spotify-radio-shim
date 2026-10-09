@@ -462,11 +462,11 @@ Figurine swap on real hardware is re-verified in the Phase 11 final acceptance.
 
 ---
 
-## Phase 8 — Private container image in GitHub Container Registry
+## Phase 8 — Container image in GitHub Container Registry
 
-**Status: partial** — 8.1/8.2/8.4 tooling implemented and committed; 8.3 pending (GHCR package visibility → Private, plus first tag-driven publish).
+**Status: implemented** — 8.1/8.2/8.3/8.4 done. The GHCR package is **public**; tag-driven publishing works.
 
-**Goal:** the shim image is built and pushed to `ghcr.io/crowdsalat/teddycloud-spotify-radio-shim` as a **private** image. Soloist is not baked in — redistribution concern satisfied.
+**Goal:** the shim image is built and pushed to `ghcr.io/crowdsalat/teddycloud-spotify-radio-shim` as a **public** image. Soloist is not baked in — it is downloaded at runtime, so the redistribution concern holds for a public image too, and the API key is a runtime env var.
 
 Split into independently verifiable subtasks. The push itself is driven by the 8.2 CI workflow using the auto-provisioned `GITHUB_TOKEN` — no manual PAT required.
 
@@ -504,14 +504,14 @@ Split into independently verifiable subtasks. The push itself is driven by the 8
 #### Verification
 
 - Pushed workflow run is green on a feature branch before merging (checks-only job).
-- Pushing a `v*` tag lands `:vX.Y.Z` (+ `:latest` pointer) in GHCR; `podman pull ghcr.io/crowdsalat/teddycloud-spotify-radio-shim:vX.Y.Z` succeeds with auth.
+- Pushing a `v*` tag lands `:vX.Y.Z` (+ `:latest` pointer) in GHCR; `podman pull ghcr.io/crowdsalat/teddycloud-spotify-radio-shim:vX.Y.Z` succeeds with no registry login.
 
-### 8.3 — Repository visibility + pull docs
+### 8.3 — Package visibility + pull docs
 
-- Repository settings: ensure the GHCR package visibility is **Private** (Settings → Packages → teddycloud-spotify-radio-shim → Visibility → Private).
-- `README.md`: document how to pull the private image:
+- Repository settings: the GHCR package visibility is **Public** (Settings → Packages → teddycloud-spotify-radio-shim → Visibility → Public). An unauthenticated pull of the manifest returns `200`, which is the check that proves it.
+- Soloist is downloaded at container start, never at build time, so nothing redistributable ends up in a layer; `SOLOIST_API_KEY` is an env var supplied by the caller. Public visibility is therefore safe.
+- `README.md`: document how to pull the image — a plain `podman pull`, no login step:
   ```bash
-  echo "$GITHUB_TOKEN" | podman login ghcr.io -u crowdsalat --password-stdin
   podman pull ghcr.io/crowdsalat/teddycloud-spotify-radio-shim:latest
   ```
 
@@ -540,12 +540,11 @@ git diff CHANGELOG.md       # → new unreleased section, conventional grouping 
 make container-push-ghcr
 # → "Pushed: docker.io/ghcr.io/crowdsalat/teddycloud-spotify-radio-shim:latest"
 
-# verify private (unauthenticated pull should fail)
+# verify public (unauthenticated manifest read succeeds)
 podman manifest inspect docker://ghcr.io/crowdsalat/teddycloud-spotify-radio-shim:latest
-# → 401 or 403 (not public)
+# → the image index is printed (public)
 
-# pull with auth
-echo "$GITHUB_TOKEN" | podman login ghcr.io -u crowdsalat --password-stdin
+# pull, no auth
 podman pull ghcr.io/crowdsalat/teddycloud-spotify-radio-shim:latest
 podman run --rm \
   -e SOLOIST_API_KEY=test -e TEDDYCLOUD_URL=http://localhost \
@@ -714,7 +713,7 @@ go build ./... && golangci-lint run ./...
 
 **Status: implemented** — `container/ocp/` Kustomize app + `deploy-ocp` make target; pending apply and final acceptance on OpenShift.
 
-**Goal:** the shim can be deployed on OpenShift from declarative manifests in `container/ocp/`: PVC `soloist-session-data` mounted at `/data`, private GHCR image pull, Secret-fed `SOLOIST_API_KEY`, probes wired to `/healthz`. Requires the Phase 8 image and the Phase 9 migration script.
+**Goal:** the shim can be deployed on OpenShift from declarative manifests in `container/ocp/`: PVC `soloist-session-data` mounted at `/data`, public GHCR image pull, Secret-fed `SOLOIST_API_KEY`, probes wired to `/healthz`. Requires the Phase 8 image and the Phase 9 migration script.
 
 > **Investigate:** the current `restricted-v3` SCC solution feels overly complicated. We set `hostUsers: false` at the pod-`spec` level (a field `securityContext` silently prunes because it does not exist there) plus `fsGroup: 1000` because `restricted-v3`'s `MustRunAs` range rejects GID 0. `runAsNonRoot`/`seccompProfile` would be auto-mutated by admission, and OpenShift would allocate `fsGroup` from the range anyway. Worth investigating whether a minimal spec (just `hostUsers: false` + no `securityContext` block, letting admission fill the rest) validates, and whether the PVC remains writable under user namespaces without an explicit stable `fsGroup`.
 
@@ -724,9 +723,8 @@ go build ./... && golangci-lint run ./...
   - `namespace.yaml` — target namespace.
   - `pvc.yaml` — `soloist-session-data` PVC, `ReadWriteOnce`, 1 Gi, mounted at `/data` (`SOLOIST_DATA_DIR`).
   - `secret.yaml` — placeholder Secret template for `SOLOIST_API_KEY` (value via `oc create secret` or SealedSecret/ExternalSecret — never in git or the image). Deployment references it via `secretKeyRef`.
-  - `pushsecret.yaml` — `imagePullSecret` for the private GHCR registry (Phase 8).
   - `deployment.yaml` — runs the `ghcr.io/crowdsalat/teddycloud-spotify-radio-shim` image:
-    - `imagePullSecrets` referencing the GHCR push secret.
+    - No `imagePullSecrets`: the GHCR package is public, so the kubelet pulls it anonymously.
     - env: `TEDDYCLOUD_URL`, `SOLOIST_DEVICE_NAME`, `LOG_LEVEL`; `SOLOIST_API_KEY` via `secretKeyRef`.
     - `volumeMounts`: PVC `soloist-session-data` at `/data`; `emptyDir` cache at `/cache` (`SOLOIST_CACHE_DIR`).
     - `securityContext` per OpenShift `restricted-v2` SCC (image already `USER 65534:0`); run as the assigned random UID, no privilege escalation.
@@ -841,6 +839,225 @@ oc logs deployment/teddycloud-spotify-shim | grep -E "volume|activate"
 
 ---
 
+## Phase 14 — Fail fast on unwritable data/cache dirs
+
+**Goal:** a missing or read-only mount is reported as an actionable configuration
+error *before* the shim spends a full Soloist download discovering it.
+
+### Context
+
+`BinaryManager.Resolve()` resolves in the order `SOLOIST_BIN` → `$PATH` →
+`$SOLOIST_DATA_DIR/bin/soloist` → download. The download branch does `http.Get`
+(`internal/soloist/binary.go:93`) and only *then* `os.MkdirAll($SOLOIST_DATA_DIR/bin)`
+(`internal/soloist/binary.go:104`), so an unwritable `/data` is discovered after
+the whole tarball is fetched, and surfaces as `soloist binary unavailable`
+(`cmd/shim/main.go:150`) — a message that points at Spotify's CDN or the network
+rather than at the volume spec.
+
+The shim does not exit there: it sets `/healthz` to `503 soloist_missing` and keeps
+serving, so a misconfigured deployment sits unhealthily instead of failing fast. With
+the OCP liveness probe (`initialDelaySeconds: 120`, `failureThreshold: 10`,
+`periodSeconds: 30`) the pod only restarts after ~7 minutes.
+
+The image deliberately ships **no** `/data` or `/cache` (see the comment in the
+`Containerfile`): both deployment paths create them outside the image — the homelab
+playbook pre-creates the host dirs `0770` owned by `65534:0`, and OpenShift creates
+the mountpoints and applies `fsGroup`. A mount masks whatever the image ships, so
+adding the dirs would not fix the deployed cases; it would only convert a forgotten
+mount into silent writes to the container's writable layer, which `--rm` and the OCP
+`Recreate` strategy then discard together with the paired device session. **Keep the
+image free of writable dirs — the fix belongs in the startup path, not the image.**
+
+### Tasks
+
+- In `cmd/shim/main.go`, validate **both** `$SOLOIST_DATA_DIR` and `$SOLOIST_CACHE_DIR`
+  *before* `bm.Resolve()`, so no network work happens on a misconfigured deployment.
+  - `os.Stat` the dir: missing → "not mounted" wording. Then a write probe
+    (`os.CreateTemp` in the dir + remove): present but failing → "not writable" wording.
+  - Do **not** `MkdirAll` the roots. Creating them reintroduces the silent-writable-
+    layer hazard above; every supported deployment pre-creates them.
+- New `/healthz` reasons `data_dir_unwritable` / `cache_dir_unwritable` instead of
+  reusing `soloist_missing` — the reason string is what the operator reads, and
+  `soloist_missing` misdirects them to the CDN.
+- Keep the no-exit convention from Phase 2b (503, do not crash-loop): the instant
+  ERROR log is the fail-fast part, and a hard exit would fight the liveness probe.
+- Log at ERROR, naming the path, the uid/gid, and the remedy:
+  ```
+  SOLOIST_DATA_DIR /data is not mounted or not writable (uid=65534 gid=0);
+  mount a volume there — "podman run -v /var/lib/apps/tc-spotify-shim:/data:Z"
+  or a PVC on OpenShift
+  ```
+- Unit tests: missing dir → `data_dir_unwritable`; `/data` present but `/cache`
+  missing → `cache_dir_unwritable` (the partial-mount case that must not pass
+  silently); both present → `Resolve` is reached, no regression. Keep the
+  not-writable branch uid-independent (a `0o555` dir is still writable for root,
+  and tests may run as root) by injecting the probe as a func.
+
+### Verification
+
+```bash
+# no volume → fails immediately, no CDN download
+podman run --rm --network none -p 8080:8080 \
+  -e SOLOIST_API_KEY=test -e TEDDYCLOUD_URL=http://localhost \
+  localhost/teddycloud-spotify-radio-shim:dev
+# log: "data_dir_unwritable" naming /data and the -v remedy
+# log: NO "soloist binary: downloading" line — the probe precedes any network work
+curl -s http://localhost:8080/healthz   # → 503 {"error":"data_dir_unwritable"}
+
+# partial mount: /data only, /cache forgotten → caught, not silently tolerated
+podman run --rm --network host -p 8080:8080 \
+  -e SOLOIST_API_KEY=test -e TEDDYCLOUD_URL=http://localhost \
+  -v /tmp/shim-data:/data:Z \
+  localhost/teddycloud-spotify-radio-shim:dev
+# log: "cache_dir_unwritable" — otherwise the cache is lost on every restart
+
+# both mounted → behaviour unchanged (falls through to download/pair)
+podman run --rm --network host -p 8080:8080 \
+  -e SOLOIST_API_KEY=test -e TEDDYCLOUD_URL=http://localhost \
+  -v /tmp/shim-data:/data:Z -v /tmp/shim-cache:/cache:Z \
+  localhost/teddycloud-spotify-radio-shim:dev
+
+go test ./... -count=1 && golangci-lint run ./...
+```
+
+---
+
+## Phase 15 — Retire the legacy `teddycloud-spotify-shim` package
+
+**Status: planned** — not started. The repository no longer references the legacy
+image anywhere (Phase 8 was rewritten for the new name); the package itself still
+exists in GHCR and is the last remaining artifact of the old name.
+
+**Goal:** `ghcr.io/crowdsalat/teddycloud-spotify-shim` stops being a reachable
+image — either because every reference is gone, or because the package is deleted —
+and the deletion is *decided* rather than discovered: every consumer is known, every
+tag that must keep working has a replacement, and the failure modes are written down
+before the registry is touched.
+
+### Context
+
+The rename from `teddycloud-spotify-shim` to `teddycloud-spotify-radio-shim` was
+cosmetic in content but created a **new package** in the registry, because GHCR
+packages are keyed by name. The old name is a separate repository with its own tags,
+its own access rules, and consumers this repository cannot see.
+
+Measured state of both packages (`skopeo list-tags`, unauthenticated):
+
+| Package | Tags | Notes |
+|---|---|---|
+| `…/teddycloud-spotify-shim` (legacy) | `v0.1.0`, `v0.1.3`, `v0.1.4`, `v0.1.5`, `v0.1.6`, `v0.1.7` | no `v0.1.2`. `v0.1.0` and `v0.1.3`–`v0.1.6` are multi-arch indexes; **`v0.1.7` is a single amd64 manifest** — the last release before the workflow was fixed. Readable anonymously, i.e. **publicly pullable today**. |
+| `…/teddycloud-spotify-radio-shim` (current) | `0.1.9`, `0.1.10`, `latest`, plus `7-hex` SHA and `-amd64`/`-arm64` tags | multi-arch. Tags carry **no `v` prefix** — the workflow publishes `type=semver,pattern={{version}}` — and `latest` is only set by pushes to the default branch, not by tag pushes. |
+
+Why that needs a phase instead of a `docker rmi`:
+
+- **The release history is split.** `0.1.0`–`0.1.7` exist only under the old name and
+  there is no `0.1.8` in either package. A consumer pinned to
+  `…spotify-shim:v0.1.7` has no drop-in replacement: the fix is to move it to a
+  *current* tag, because `…radio-shim:v0.1.7` does not exist and never will.
+- **"Who still uses it" is not answerable from our side.** The legacy package is
+  publicly pullable, so any host that pulled it before the rename may still run it,
+  and any `docker://` reference in someone else's CI job, `Dockerfile`, Helm/ArgoCD
+  value, or runbook keeps resolving silently until the package disappears.
+- **Local caches mask the breakage.** A host holding the old image in its Podman/OCI
+  cache starts `Recreate`d containers just fine after deletion — including a rollback
+  that was never actually tested. Verification must test a *cold* pull.
+- **Deletion is not recoverable.** GHCR has no undelete and no per-tag delete in the
+  UI. The source tags `v0.1.0`, `v0.1.3`–`v0.1.7` are in this repository's history, so
+  the images are *reconstructible*, but a rebuild is not guaranteed bit-identical to
+  what was released.
+- **It cannot be deleted from this environment.** The available token carries
+  `admin:public_key, gist, read:org, repo` — no `read:packages`, no
+  `delete:packages`; `gh api …/packages/container/teddycloud-spotify-shim` answers
+  `403: You need at least read:packages scope`, and deletion additionally requires
+  package *admin*. This is an org-owner action in the UI (or with a fresh PAT).
+
+### Tasks
+
+1. **Decide the outcome first: keep, mirror, or delete.** Deleting is not required to
+   stop *new* deployments from picking up the old name — the repository no longer
+   references it. If task 2 finds a live consumer, finish task 3 and stop; if it finds
+   none, go through tasks 4–7. Record the decision in this section when it is made.
+2. **Inventory consumers before touching the registry.** This is the step that decides
+   whether deletion is safe, so write down what was checked *and what was not*:
+   - Repository: `rg -n 'ghcr\.io/crowdsalat/teddycloud-spotify-shim'` over all tracked
+     files. The remaining bare `teddycloud-spotify-shim` strings in
+     `internal/config/config.go` (the `SOLOIST_DEVICE_NAME` default),
+     `docs/research/ocp-playback-issues.md`, and the `oc get` examples are the
+     **device/resource name, not the image** — they stay.
+   - Deployments: VLS1 (`../homelab` → `app_image:`, already on
+     `…radio-shim:0.1.10`) and the live OpenShift deployment —
+     `oc get deploy -n app-teddycloud -o jsonpath='{.items[*].spec.template.spec.containers[*].image}'`
+     reports what the cluster is really running, independent of the manifests here.
+   - Local caches: `podman images | grep teddycloud-spotify-shim` and
+     `podman ps -a --filter ancestor=ghcr.io/crowdsalat/teddycloud-spotify-shim:v0.1.7`
+     on VLS1 and every dev host.
+   - GitHub: workflow files (already `$GITHUB_REPOSITORY`-derived), Dependabot config,
+     release notes, and `docker://` references in issues/PRs. The `CHANGELOG.md` entry
+     "Rename image to teddycloud-spotify-shim" is a historical record — keep it, and
+     do not rewrite git history as part of this phase.
+3. **Mirror any tag that must keep working**, before it can be lost:
+   ```bash
+   skopeo copy --all docker://ghcr.io/crowdsalat/teddycloud-spotify-shim:v0.1.5 \
+     docker://ghcr.io/crowdsalat/teddycloud-spotify-radio-shim:0.1.5
+   skopeo inspect --raw docker://ghcr.io/crowdsalat/teddycloud-spotify-radio-shim:0.1.5 | sha256sum
+   ```
+   Repeat per tag, and pin the **digest** in anything that must not drift. A mirror
+   inherits the arch asymmetry: mirroring `v0.1.7` gives an amd64-only tag, which does
+   not help an arm64 host.
+4. **Delete the legacy package** (human action, org-owner credentials):
+   - UI: org → `Settings` → `Packages` → `teddycloud-spotify-shim` → `Delete package`
+     (the full name must be typed to confirm), or
+   - `gh api -X DELETE /orgs/crowdsalat/packages/container/teddycloud-spotify-shim`
+     with a token holding `delete:packages` **and** package admin.
+   All tags go at once. There is no undelete.
+5. **Fix the Phase 8 tag-form contradiction found while doing this.** Phase 8 states
+   that a `v*` push publishes `:vX.Y.Z` and moves `:latest` to it; the workflow
+   actually publishes `:X.Y.Z` and sets `:latest` only on default-branch pushes. Every
+   released tag is `0.1.x`, so the Phase 8 text, the `container-tag` example, and the
+   8.2 verification are all wrong. Pick one convention (publish the git tag verbatim
+   with `type=ref,event=tag`, or correct the docs to `:X.Y.Z`) and make workflow,
+   Makefile, and docs agree — do not leave the docs describing tags that do not exist.
+6. **Optional local cleanup, strictly after task 4:** drop the cached legacy image on
+   the hosts found in task 2 (`podman rmi …`) so no host can keep serving a deleted
+   image. Doing this earlier spends the only rollback path that silently exists.
+
+### Consequences and rollback
+
+| Action | What breaks | Recovery |
+|---|---|---|
+| Delete while a host is still pinned to `…spotify-shim:v0.1.x` | `podman pull` fails; on OpenShift, `ImagePullBackOff`. Invisible while the host serves from cache. | Repoint the deployment to a current `…radio-shim` tag. If the old version is genuinely required, rebuild it from its source tag and push it under the new name (task 3). |
+| Delete before mirroring a tag still in use | No path back through the old name, and the exact released digests are gone. | Rebuild from `git tag v0.1.x` (all tags are in this repo) and re-push; close to, but not guaranteed identical to, the original layers. |
+| Delete while a third party is mid-pull | Transient failures for external consumers, outside our control — unavoidable given the package is public. | None locally; content is reproducible from the source tags. |
+| Prune local caches too early | The rollback path that never existed in the registry is used up. | Same as any other pull failure: repoint to a current tag. |
+
+### Verification
+
+```bash
+# 1. no live reference to the legacy image in the repository
+rg -n 'ghcr\.io/crowdsalat/teddycloud-spotify-shim' .   # → only this phase, or nothing
+
+# 2. cold registry check: a deleted package 404s for anonymous and authenticated
+#    callers alike, while the current package is untouched
+skopeo list-tags docker://ghcr.io/crowdsalat/teddycloud-spotify-shim
+# → "name unknown" / 404  → the legacy package is gone
+skopeo list-tags docker://ghcr.io/crowdsalat/teddycloud-spotify-radio-shim
+# → still lists 0.1.x + latest  → the current package survived
+
+# 3. the current image still pulls multi-arch and runs
+podman pull --platform linux/amd64,linux/arm64 \
+  ghcr.io/crowdsalat/teddycloud-spotify-radio-shim:0.1.10
+podman run --rm -e SOLOIST_API_KEY=test -e TEDDYCLOUD_URL=http://localhost \
+  ghcr.io/crowdsalat/teddycloud-spotify-radio-shim:0.1.10
+curl -s http://localhost:8080/healthz   # → 200 OK or 503 (soloist_missing — no session yet)
+
+# 4. consumers, cold: a redeploy must resolve the image, not serve it from cache
+oc rollout restart -n app-teddycloud <deployment>   # the one from task 2
+oc rollout status  -n app-teddycloud <deployment>
+# VLS1: remove the container (image only) → redeploy → no pull error, /healthz ok
+```
+
+---
+
 ## Dependency graph
 
 ```
@@ -854,7 +1071,7 @@ Phase 1  (skeleton + Containerfile)
                                       └── Phase 5  (mock-teddycloud + SSE listener)  ← integration gate
                                             └── Phase 6  (real Teddycloud — validate & fix mock)
                                                   └── Phase 7  (hot-swap, against validated mock)
-                                                        └── Phase 8  (GHCR private image)
+                                                        └── Phase 8  (GHCR public image)
                                                               └── Phase 9  (session migration script)
                                                                     └── Phase 10 (polish)
                                                                           └── Phase 11 (OpenShift manifests)
@@ -865,6 +1082,8 @@ Phase 11 (OpenShift manifests) — needs Phase 8 image + Phase 9 migration scrip
 
 Phase 12 (stop recorder drops) — needs deployed OCP pod (Phase 11) for reproduction; recorder changes must respect the Phase 3b.1 pulse-goroutine constraint.
 Phase 13 (volume 100) — needs deployed OCP pod (Phase 11) for verification; independent of Phase 12.
+Phase 14 (fail fast on unwritable dirs) — independent of every phase; local Go change, verifiable with `podman run` alone.
+Phase 15 (retire legacy GHCR package) — needs Phase 8; deletion is irreversible, so the consumer inventory is the gate, not a code change.
 
 cmd/mock-teddycloud scaffolding can be started any time after Phase 1.
 ```
@@ -880,8 +1099,8 @@ All configuration via environment variables.
 | `SOLOIST_API_KEY` | Yes | — | Spotify Soloist API key. Treat as secret. |
 | `TEDDYCLOUD_URL` | Yes | — | Teddycloud base URL, e.g. `http://teddycloud:80` |
 | `LISTEN_ADDR` | No | `:8080` | Shim HTTP listen address |
-| `SOLOIST_DATA_DIR` | No | `/data` | Soloist data + session directory. Mount PVC here. |
-| `SOLOIST_CACHE_DIR` | No | `/cache` | Soloist cache directory |
+| `SOLOIST_DATA_DIR` | No | `/data` | Soloist data + session directory. Mount PVC here. Must exist and be writable — the shim never writes into an unmounted path (Phase 14). |
+| `SOLOIST_CACHE_DIR` | No | `/cache` | Soloist cache directory. Must exist and be writable (Phase 14). |
 | `SOLOIST_DEVICE_NAME` | No | `teddycloud-spotify-shim` | Spotify Connect device name |
 | `SOLOIST_VOLUME` | No | `100` | Soloist playback volume (0–100). Sent via `set_volume` after activate and as `--initial-volume` at spawn. |
 | `SOLOIST_BIN` | No | auto | Explicit path to soloist binary. Skips download if set. |
